@@ -1,0 +1,20 @@
+.blue-card{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-card);padding:var(--space-16) var(--space-24);display:flex;flex-direction:column;gap:var(--space-12)}
+.blue-card header{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-12);flex-wrap:wrap}
+.blue-card-title{display:flex;align-items:baseline;gap:var(--space-8);flex-wrap:wrap}
+.blue-rank{color:var(--text-3);font-variant-numeric:tabular-nums}
+.blue-card-scores{display:flex;flex-wrap:wrap;gap:var(--space-4)}
+.blue-excerpt{margin:0;font-size:var(--font-14);white-space:pre-wrap;overflow-wrap:anywhere}
+.blue-evidence ul{margin:0;padding-left:20px;font-size:var(--font-13);color:var(--text-2)}
+.blue-evidence details{font-size:var(--font-12);color:var(--text-3);margin-top:var(--space-4)}
+.blue-report blockquote{margin:var(--space-4) 0 0;padding:var(--space-8) var(--space-12);background:var(--bg-sunken);border-left:3px solid var(--border);font-size:var(--font-13);overflow-wrap:anywhere}
+.blue-caveats{margin:0;padding-left:18px}
+@media(max-width:767px){.blue-card{padding:var(--space-12) var(--space-16)}}
+.blue-filter-links{display:flex;flex-wrap:wrap;gap:var(--space-4) var(--space-12)}
+/* One card per account; its posts sit inside on the sunken background. */
+.blue-account{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-card);padding:var(--space-16) var(--space-24);display:flex;flex-direction:column;gap:var(--space-12)}
+.blue-account>header{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-12);flex-wrap:wrap}
+.blue-account-posts{display:flex;flex-direction:column;gap:var(--space-8)}
+.blue-card.blue-post{background:var(--bg-sunken);padding:var(--space-12) var(--space-16)}
+.blue-copy ul{margin:var(--space-4) 0 0;padding-left:20px;font-size:var(--font-13);color:var(--text-2)}
+@media(max-width:767px){.blue-account{padding:var(--space-12) var(--space-16)}.blue-card.blue-post{padding:var(--space-8) var(--space-12)}}
+.blue-confirm blockquote{margin:var(--space-8) 0;padding:var(--space-8) var(--space-12);background:var(--bg-sunken);border-left:3px solid var(--border);font-size:var(--font-13);overflow-wrap:anywhere}

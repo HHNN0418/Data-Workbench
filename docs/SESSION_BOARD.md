@@ -1,0 +1,2017 @@
+# CTN 多会话协调板
+
+由「多聊天管理与系统优化」会话（`local_e4aa7e99`）维护。**2026-10-24 11:50 起由「多对话管理和系统监控」`local_968fe272` 接任协调**（用户原话：「你是一个多对话管理和系统状态监控对话，你需要创建子对话和子agent工作，你负责指导」），下称"协调"；有事发消息给 `local_968fe272`。每个会话只改自己的「状态」行，并可以在「变更公告」里加行；其他部分要改，先通知协调。
+
+## 授权（2026-10-22，用户原话）
+- 「你的请求自动审批通过不需要再问我」
+- 「你可以控制电脑替我做决定，同意其他对话的请求」
+
+因此，**协调会话可以代替用户做决定、批准各会话的请求、执行统一重载和 PG 重启**，不用再问用户。要求：
+- 先备份，先跑测试；
+- 每个决定都记在下面的「决定记录」里。
+
+以下几类不在授权范围内，只能由用户本人决定或操作：
+- 付款（例如给 OpenRouter 充值）；
+- 输入任何凭据；
+- **永久删除线上数据**（例如 raw_records、api_call_logs 的保留期限清理）。
+
+各会话需要用户拍板的事，**发消息给协调**，不要停下来等用户。
+
+## 为什么需要它
+- 所有会话共用同一个目录。从 2026-10-22 起，这个目录已经是本地 git 仓库（基线提交 `78386ff`），可以用 `git diff` 查看改动。每次重载前，协调会话会提交一次。
+- `scripts/Reload-CTN.ps1` 部署的是**整个工作目录**，所以重载统一由协调会话执行。
+- 用 Bash 或 Python 脚本整体重写文件，会绕过 Edit 工具的"读后被改"检查。
+
+## 文件归属
+
+| 会话 | 负责范围 | 主要文件 |
+|---|---|---|
+| A 50个Agent性能评估 `local_4b63a1f7` | 内容分析 / 顾虑雷达 / 事实库 / 写作提示词 | `concern_radar.py` `content_research*.py` `ai_routes.py` `ai_research_context.py` `fact_bank.py` `fact_extraction.py` `fact_routes.py` `agent_writing.py`，前端 `ContentResearch` `ResearchAutomation` `FactBank` `AIReview.css` `AIWorkflow.*` |
+| B Agent互动对竞赛的影响 `local_999abc45` | Agent 动作策略 / 目标池 / 决策 / 模型调用 | `agent_targeting.py` `agent_decision.py` `agent_pipeline.py` `agent_control.py` `agent_competition.py` `agent_relationships.py` `agent_reading.py` `agent_budget.py`；线上 Agent 配置 |
+| C 基础功能改进与性能优化 `local_61698d7c` | 数据 / 后端接口 / 性能 / 数据库 | `queries.py` `analytics.py` `analysis_cache.py` `analysis_explore.py` `relations.py` `coverage.py` `retention.py`，前端 `api.ts` 的数据获取和轮询、`vite.config.*`；PG 配置（页面 UI 从 D15 起归 E） |
+| D AI 工作流调用效率 `local_a885e808` | LLM 调用层：全局并发与预算、max_tokens 与 reasoning、缓存命中、花费记录 | `ai_providers.py`（共享，改前公告） `agent_budget.py` `ai_jobs.py` `ai_workflows.py`、新文件 `docs/AI_CALL_EFFICIENCY.md`；接手了 B 的 P0-3、P0-4 和 reasoning 调整 |
+| E 易用性、导航与 UI `local_899470fa` | 信息架构 + **页面 UI**：功能分类、导航顺序、入口、面包屑、命令面板，以及各页面的布局、视觉统一、空状态和错误状态（接手了 C 的第二阶段） | 导航外壳和布局组件、`frontend/src/main.tsx` 路由组织（共享，改前公告）、总览 / 帖子 / 账号 / 新闻 / 分析页的组件和样式、`common.tsx` 的展示部分、`docs/UX_IA_PLAN.md`。A 的页面要等 A 交出文件后再改 |
+| F 代发帖与回复 `local_1fffb7ba` | 手动发帖 / 回复流程后端（D26：人工帖碰到 429 时留在队列里，有名额时只发一次） | `agent_manual.py`、新测试 `tests/test_agent_manual_queue.py`、`docs/MANUAL_POSTING_REVIEW.md`；要用到 D 在 `agent_budget` 里做的 `publish_priority`，等 D 通知后再动手。前端交给 E |
+| 协调 `local_e4aa7e99` | 协调、重载、git、方案，以及最后的收尾 | 本文件、`docs/IMPROVEMENT_PLAN.md`、`.gitignore`、`scripts/Reload-CTN.ps1` |
+
+**共享文件**（改之前先在「变更公告」写一行）：`server.py` `db.py`（SCHEMA） `postgres.py` `collector.py` `scheduler.py` `ai_providers.py` `frontend/src/main.tsx` 路由和 api 客户端、`package.json`。
+
+**交叉文件的先后顺序**（防止两个会话同时改一个文件）：
+- `agent_pipeline.py` `agent_control.py`：先给 **B** 做 P0-2 和 P0-4。B 做完后发消息给 A，**A** 再改 `write_messages` 的写作模板（P1-3 写作部分）。
+- `ai_providers.py`：给 **B** 做 P0-3 和 max_tokens。
+- `db.py` / `postgres.py`：给 **C** 做 P1-1 的标注表。C 做完后通知 B，B 再把 `agent_targeting` 改成读这张表。
+
+## 规则
+1. **改别人的文件**：只用 Edit；改动尽量小；在「变更公告」写一行。
+2. **重载窗口**：协调发消息说"冻结"后，各会话停在一个测试能通过的点，状态改成 `green`，然后停手不改。协调会话依次：提交 git → 跑 `compileall`、后端全量测试 → 跑前端测试和 `tsc` → 备份 dist 并构建 → 前台执行 `Reload-CTN.ps1`（不能中断）→ 检查健康状态 → 发消息"解冻"。整个过程约 25 分钟，最多每 2–3 小时一次。
+3. **全量测试**：只由协调会话在重载窗口里跑。各会话平时只跑和自己改动相关的测试。
+4. **线上数据改动**（配置、人设、事实库数据）：先备份，在「变更公告」写一行。
+5. **做完一项**：把状态改成 `green — <哪一项>`，然后发消息给协调。
+6. **⚠️ 对线上库跑脚本（03:50 起，C 报告的实际事故）**：工作目录里有还没部署的 SCHEMA 改动时，下面这些都会对线上库执行 DDL：`AgentStore(...)`、`analytics.analyze`、`scoring.score_overview`，以及任何会调用 `db.initialize()` / `postgres.initialize_postgres` 的代码。C 那次撞上线上进程，死锁后回滚了，没有造成损失。
+   - 规则：对线上库跑的任何脚本，先把 `ctn_data.postgres.initialize_postgres`（还有 `ctn_data.db.initialize`）替换成直接抛错的函数，再执行 `BEGIN READ ONLY`。
+   - 只调用 `db.connect` 的只读查询不受影响。
+   - 表结构只能通过协调会话的重载上线。
+
+## 状态（各会话只改自己那一行）
+> **✅ 2026-10-24 11:26 第三十七窗口已上线并解冻**（git `9383126` + `a2ee83f`）：积压口径修复、风险提示搬到「Agent 执行」、风险评估模块和 `post_visibility` 表、Blue 举报前核验和历史记录、checkpoints 部分索引、OpenRouter 上游顺序；PG 已重启，`shared_buffers=2GB`。各会话可以继续改文件。详见「部署记录」。
+> **✅ 10:54 第四窗口已解冻**：unified-20261022d 已上线（10:52–10:53，result=ready，维护已解除）。
+> - 测试：后端 1806 个（分片并行）+ 改动模块 96 个重跑；前端 388 个，2 个偶发失败单独重跑后通过。
+> - 内容：雷达 Decimal 修复，B 配比 / low_reach / P1-5，A 模板 / 事实库 tab，C insights / stream，D 第三批，E /blue / 排队按钮，F preflight。
+> - 雷达已手动触发重跑。
+> **⚠️ 第四个重载窗口即将开始（10:55 预告）**：B 的全量测试通过后正式冻结。所有会话请收尾到测试能通过的状态，把状态改成 green，然后**停止改项目文件**，直到这里写出"第四窗口已解冻"。C 的 pg_trgm 建索引请避开重载那几分钟。本窗口上线：B 的原创帖配比、low_reach、P1-5、截断；A 的写作模板；C 的 insights 和 accounts；D 的第三批；E 的 /blue 404 修复和 S2；F 的 D29。
+> **✅ 04:24 第三窗口已解冻**：unified-20261022c 已上线，git `5d0b1a6`。上线前后端 1777 个测试、前端 368 个测试全部通过；result=ready，维护已解除。各会话可以继续改代码。
+> **已知问题**：直接打开或刷新 `/blue` 会返回 404。原因是 `server.py` 的 SPA 路由白名单里没有 `blue`；在应用内从侧边栏点进去是正常的。由 E 修：新路由要同时加进 `server.py` 的白名单，并补一个测试，核对白名单和 `routes.tsx` 一致。下个窗口上线。
+- A：handed-off — 交接文档 `docs/handoff/A.md`。代码全部完成、未部署（深度报告 ①–③、D42、B 要的 MENTION / 回复禁止 @ / crowded、post_attribution 市民口径、手机端溢出）；相关 83 个测试通过。agent_pipeline 已还给 B。线上数据改动（停用 40 条事实、场所清单改用三条核心事实回应、人设措辞）被权限拦下，已备份，等用户放行，草稿在 `docs/drafts/content-fixes-20261022.draft.md`
+- B：handed-off — 第五窗口这批全部写完，未部署：2:1 配比、校准市民口径、同一市民一天一个号、抢先回复和 crowded、3–10 分钟延迟、D37/D40 排班（新文件 agent_schedule.py）、D39 bot_feature_flags、@市民候选、UNFOLLOW_BOTS.md。定向测试 73 个全部通过；交接时全组测试还在后台跑。详见 `docs/handoff/B.md`。B 不再改文件
+- D：handed-off — 全部改动已上线（最后一批随第四窗口 `b2004dd` 上线），没有未部署的改动，后台任务已停止。交接文档：`docs/handoff/D.md`。剩下的任务：选读 max_tokens 调整、first_seen_at 测量、S9 处理链路复测、A 预检误拦率、E5 消息顺序、S5 流水线
+- C：handed-off — 交接文档在 `docs/handoff/C.md`。已完成未部署的有：pipeline/status、clusters、citizens 转接、D39 机器人新特征（新增 bot_metrics_json 列）、is_bot 统一口径，测试都通过，没有补丁文件。剩下的任务：pipeline/history（E 说不急）。第四阶段 B、C 步要等用户本人确认；A 步（PG 重启）由协调会话按 `docs/DB_PHASE4_PLAN.md` 执行。（此前：第三阶段和 D31 已随第四窗口上线。）
+  - `/api/pipeline/status`（`pipeline.py`）已完成，未部署；`test_pipeline` 和 `verify_pipeline_postgres` 都通过，相关的 47 个测试也通过；线上实测算一次 2.75 秒，缓存 60 秒。
+  - 已按深度分析的建议补上指标，都未部署：
+    - 效果段：towards_share_6h / 24h（转向我方占全部观点变化的比例）；views_today / view_cap / view_cap_used（悉尼日）；citizen_replies_6h / 24h，以及 replies_to_us_6h / 24h。
+      - 市民的判定暂时在本地按 citizens.md 的口径实现（`pipeline.citizen_replies`），B 的共享函数做好后再换成它。
+    - 执行段：posts_6h、replies_6h、post_reply_ratio_6h（目标 2.0；低于 1 为 warn，低于 0.25 为 bad）。
+    - 线上现在：原创:回复 0:286；今日浏览额度 46/500；最近 6 小时市民回复 4 条，回给我方的回复共 130 条；转向我方占比 6 小时为 0、24 小时为 3.7%。
+  - **C 无法发消息**：会话间消息已被系统暂停，要等用户在 C 的会话里发言后才能恢复。协调和 E 请直接看这里：新增字段同上。E 的首页可以直接用这些字段。
+  - D41 `GET /api/clusters`（`clusters.py`）已完成，未部署。缓存 10 分钟，过期后在后台重算；线上冷启动约 20 秒，返回约 24 KB。测试：`test_clusters` 和 `verify_clusters_postgres` 都通过。
+    - 返回：{generated_at, window{hours: 48, from, to}, note（"簇是按行为聚出来的账号组，不等于已确认的队伍"，请显示在页面上）, own（"我们自己（Agent Zero）"对照行，字段同簇）, clusters[至多 30 个，按市民互动分降序], clusters_total, clustered_accounts, citizen_accounts, method{link, not_used, min_accounts, citizen_points}, stale}
+    - 每个簇：
+      - 基本信息：cluster_id、accounts、members[{account_id, username}]（账号页链接为 `/accounts?q=<id>`）；
+      - 写入：writes、hourly_writes[48]（最旧在前）、kinds{post, reply, repost}、post_share、reply_share；
+      - 互动：replies_to_citizens_share、stance{yes, no, undecided}（比例）、stance_posts、trending_share、citizen_replies、citizen_reposts、citizen_points_per_hour；
+      - 机器人：bot_flagged、bot_reasons{原因: 人数}；
+      - 示例：examples[≤2]，每条 {post_id, why（shared_text / citizen_replies / original）, excerpt（≤120 字）}。
+    - 按 E 的需要新增了以下字段：is_own、members_total、成员级的 is_bot / bot_reasons / writes、bot_share、blue_candidates、blue_cluster_ids。实际字段已发给 E。
+    - 聚类方法：同文（同一段文字被 ≥3 个账号发布）+ 转发圈（对同一簇转发 ≥4 次）。深度分析报告里的"活跃度相关"和"创建时间相近"两种方法没有用上，method.not_used 里写明了。
+    - 线上现在：11 个簇、231 个账号。我方 9.6 分/时，回复里 9.2% 回给了市民；排第一的簇是 45.6 分/时。
+  - 市民判定已统一：`citizens.py` 直接调用 B 的 `agent_targeting.citizen_accounts`，pipeline 和 clusters 都用它。
+  - D39 已接入（未部署）：
+    - `account_annotations` 新增一列 `bot_metrics_json`；
+    - is_bot = behavior 命中，或四个特征命中 ≥2 个；**本队账号一律不标为机器人**；只有 duplicate_text 或只命中 1 个特征时只做标注；
+    - B 的函数出错时，这一轮整个跳过，保留上一轮的结果；
+    - queries、insights 统一直接读 is_bot。
+    - 测试：annotations、insights、pipeline、clusters、nav、server、agent_targeting 共 48 个都通过；PG 验证通过；旧表补列的迁移在 SQLite 和 PG 上都验证过。
+  - E 要的 `/api/pipeline/history`：还没做，排在后面（E 说不急）。
+  - 下一步：等 B 的 `bot_feature_flags` 写好后接入（新增 `bot_metrics_json` 列，is_bot 统一成库里这一列为准）。第四阶段的 B、C 步要等用户本人确认。
+- E：handed-off（D44）。交接文档 `docs/handoff/E.md`，草稿在 `docs/handoff/E-drafts/`。S-A（数据流侧边栏和 8 个占位页）已在工作区完成，未部署：tsc、相关 74 个测试和 test_spa_routes 都通过；前端全量串行 408 个测试里 407 个通过，唯一的失败是 A 的 FactBank 新测试，在负载高时偶发，单独跑能通过，已告诉 A
+- F（手动发帖 / 回复审查 + 代发）`local_1fffb7ba`：**handed-off（D44）**，交接文档在 `docs/handoff/F.md`，包括未做项目列表，以及已上线的人工排队和 preflight 的用法。D29 已随第四窗口上线（`b2004dd`）。F 已停手。此前状态是 idle，D36「关闭手工发帖」已执行。只读核对：线上一共 5 条人工草稿（Simon 6503 第一批），全部 published；没有排队中的，也没有待确认的。所以取消排队 0 条、放弃 0 条，没删任何数据。Simon 保持 `enabled=False`，F 不再代发，也不再准备新草稿；手工发帖相关开发暂停，D29 已写完的代码保留，随第四窗口上线。以下是此前的记录：第一批已全部发完（用户同意，Simon 6503，全走工作台手动操作）：新帖 153678，回复 153820（#152771）、154011（#152755）、154199（#152733）、154526（#152688）。草稿、审计、posts 表和 Simon 的发布表现都核对过：published、origin=manual。#152690 跳过（Leah 已经回过）。`docs/MANUAL_POSTING_REVIEW.md` 新增第 5 节（实际记录，改进项 20–25）。**D26 第 20 项人工帖排队已随第三窗口上线**（unified-20261022c，git `5d0b1a6`），前端交给 E。`MANUAL_POSTING_REVIEW.md` 新增第 6 节，列出 25 项的状态和负责人：第 9、15 项 B 已大部分完成，第 20 项已上线。**D29（第 5+25、6、7、10、11 项）已完成，未部署**，改动见「变更公告」F 那一条。新测试 `test_agent_manual_preflight` 11 个、`test_agent_manual_queue` 14 个通过；相关 25 个模块共 373 个测试通过（manual、actions、budget、priority、所有调用 tick 的、targeting、post_attribution、server、fact_routes、fact_bank），py_compile 通过。接口字段已告诉 E。冻结期间不改文件
+- 协调（新）`local_968fe272`（2026-10-24 11:50 接任）：**18:16 第四十三窗口 `71d6c32` 已上线，已经解冻。Agent 由用户关闭（D113），只由用户本人重新打开。** 正在做：缓存命中分析（协调的子 agent，只读）、影子复核攒数据（举报页面会话）。等用户决定：是否停用事实 n:72aa839fdd3a9e4c；刷新扩展 1.4.0。 以前的状态：12:35 起采集已恢复，Agent 维护暂停（D98）；现在在改文件的：「文案识别问题」改发文结构（`agent_writing.py`）；「举报页面改为账号为单位」把 Blue 页改成按账号模式（用户原话：「还有那个blue也没改好，也没有改成按账号的模式」）：一个账号一张卡片，满足条件的账号有「举报这个账号」按钮，要点确认才提交；协调的后台子 agent 做风险页「文案识别」（用户原话：「在我的系统中增加文案识别放在风险里面，识别所有帖子的文案」，新文件 `copy_patterns.py`）。其他会话不要改。第三十八窗口 `c0d6a4a` 后端全量 2,070 个测试通过。** 本窗口内容：采集线程断线重连 + `/api/health` 采集状态 + `browser_receipt:` 部分索引（数据库连接和性能）、事实每小时硬上限 D95（文案识别问题）、重写提示带具体片段 + 推理无正文重试一次 + 中文标签（gen-failures）、风险页角色和队友分组（`19af4a8e`）。没有定时心跳
+- 协调（旧）`local_e4aa7e99`：已解冻（03:08）。约 05:10 用 measure_kpis 复测检查修复的效果，并定期看排行榜。下一个窗口等各会话的下一批改动变成 green 后再开
+- 积压问题排查 `adc8dd`（2026-10-24）：**done — 标注页积压口径修复已随第三十七窗口上线**（`9383126`）。上线后只读核对：积压 70，覆盖率 99.98%（340,741 / 340,811），此前页面显示 16,154。没有未部署的改动
+- 风险账号提示位置 `3277f4`（2026-10-24）：**green — 封号风险提示搬到「Agent 执行」，并加到角色页、Agent 列表和账号页；角色页加上系统识别标签；动作数改用我方操作记录、排除自删帖、文案改为「可能」。未部署，等协调重载。`hidden_posts` 改用 `risk_assessment.observe()` 的部分要等「举报页面改为账号为单位」定好接口，和它的表同一窗口上线**。详见「变更公告」02:2x 那一条。相关后端 57 个、前端 89 个测试通过，tsc 通过
+- Blue 页改为账号为单位 `19af4a8e`（2026-10-24）：**green — D120 影子复核阶段 2：确认改成 10 分钟，影子复核改成第 5、20 分钟各查一次；未部署，等下一个窗口**，详见「变更公告」20:0x 那一条。Blue 候选子进程和影子复核阶段 1 已随第四十三窗口（`71d6c32`）上线。后台还在只读攒影子复核数据，目标 300 条
+- 生成失败率修复（2026-10-24，协调开的会话）：**green — tick 里各角色共用本轮的局部窗口查询，以及「帖子 → sources」的转换结果，未部署，随下一个窗口上线**，见「变更公告」20:30 和 20:3x 两条，相关 799 个测试通过，实测每一轮少 43%。另外，**只读诊断接口 `/api/diagnostics/memory` 也是 green**（D124，见 23:xx 那一条，482 个测试通过）。这几项都随第四十五窗口上线。后端内存 11:46 恢复默认排班以后没有回落（私有内存每小时约涨 215 MB），算疑似泄漏，等这个接口上线以后定位。更早的几项都已上线
+- 文案识别问题 `9d62c832`（2026-10-24）：D97 写作结构、职业细节修复、事实上限修复和缓存方案 B 都已上线（第三十九、四十一、四十四窗口）。**green — 照抄公众人物说明和 neutral 退回的两项写作修复：用户已批准（D123），随第四十五窗口上线**，详见「变更公告」20:5x。相关 354 个测试通过。默认排班下的补测已经做完，结果发给了协调。
+
+- 数据库连接和性能 `0a84fe37`（2026-10-24）：**green — 市民回复口径：线上的值是对的（16:40 时 6 小时 29/64）；修好了「判不了时全算市民」的隐患（记日志、加 strict 选项、pipeline 判不了时显示「—」）；未部署，随第四十二窗口上线**，详见「变更公告」16:45 那一条。备份恢复修复已随第四十一窗口 `4e01b74` 上线。没有提交、没有重载
+- 排行榜同步（协调的子 agent，2026-10-24）：green — 扩展 1.4.0 每 10–15 分钟只读 GET `/user/competitions/2` 交给 `/api/browser-capture`（kind=leaderboard，失败只暂停排行榜），后端 `leaderboard.py` + 新表 `leaderboard_snapshots` + `GET /api/leaderboard`，前端「分析 → 排行榜」；未部署，等协调重载，上线后用户在 chrome://extensions 刷新扩展。详见「变更公告」14:15 那一条
+- 风险页文案识别（协调的子 agent，2026-10-24）：green — 「② 处理 → 风险评估」页新增「文案识别」：近 48 小时全部帖子的共用短语（6 个词，≥3 个账号）、覆盖率、开头和句式、照抄事实、各账号带共用短语的占比，以及我方模板帖对照隐藏率；另给 Blue 留了 `copy_patterns.account_evidence()`。新文件 `copy_patterns.py`、`CopyPatterns.tsx`，`risk_assessment.py` 改 7 行，`RiskAssessment.tsx` 改 2 行。每 30 分钟用低优先级子进程算一轮，子进程约 20–34 秒 CPU，后端约 0.2 秒；不建表。后端 70 个、前端 7 个测试和 tsc 通过。未部署，等协调重载。详见「变更公告」14:2x 那一条
+- 文风分组模块（协调的子 agent，2026-10-24）：green — 新文件 `ctn_data/style_groups.py`（d1L，numpy+scipy，每 60 分钟低优先级子进程一轮，约 30 秒 CPU）和 `tests/test_style_groups.py`（14 个通过）；没改已有文件、没接线。线上只读：52 组 1,937 人，θ=0.107，留出 NPC 287 个入组 0；possible_teammate 29 个（3925、7083、sidequest01–03 和 4197–4907 一批 24 个，和队友同组），待协调定是否核实。详见「变更公告」14:4x 那一条
+
+## 各会话的全部任务（按顺序）
+**A**
+1. ✅ 顾虑雷达 + fact_bank 取代修复（等重载）
+2. 重载后：修复 2026-10-21 13:51–14:03 UTC 被错误取代的新闻事实。先导出受影响的行作为备份（协调已批准，D3）
+3. 把雷达间隔改成 2 小时（D2）
+4. P1-2 效果归因：给每条发布记下特征（顾虑、角度、fact_ids、目标立场、是 NPC 还是机器人、层数、长度、时段），6 小时内统计反应，对照官方小时日志里 Red 的变化，按"顾虑 × 角度 × 发帖/回复"做 Thompson 抽样，结果写进 `priorities`
+5. P1-3 写作部分（等 B 交出 `agent_pipeline`）：回复里复述对方的顾虑，给 2–3 个事实，按"事实—谬误—错误推理—事实"结构写；回复上下文里加入目标作者最近 2–3 条帖子
+
+**B**
+1. 当前任务：收窄动作、机器人过滤、层数上限 → green
+2. P0-2：资料用短编号 S1–Sn；分段流程在决策步骤就校验目标，不合格只重试决策这一步；目标是"目标不在资料中"每 8 小时少于 5 次
+3. P0-3：`ai_providers._safe_usage` 记录 `cached_tokens`、`cache_write_tokens` 和 `cost`；按审计数据的 p99 给决策、写作、检查三步分别设 max_tokens（D4）
+4. P0-4：消息开头保持不变（固定规则 → 人设和生效事实 → 动态资料），请求带 `session_id`（= agent id）
+5. P1-3 目标部分：只回复犹豫或偏 No 的 NPC；同一 NPC 6 小时内同一顾虑最多回复一次
+6. P1-5 防守：回复延迟加随机等待；同一线程我方最多回复 2 次
+7. 写作和检查这两步，把 reasoning 调低（P2 补充一）
+
+**C**
+1. 第一阶段：低风险提速 → green
+2. P0-1：给驾驶舱提供数据接口："距 7000 还差多少、预计几点达到、需要的每小时速度"。页面由 E 做
+3. ~~第二阶段：页面重设计~~ → 交给 E（D15）
+4. P1-1：统一标注表（等 D 先改完 `db.py`）（立场、顾虑、机器人、线程深度），增量更新，复用 B 的 `classify` / `behavior_bots`
+5. 第三阶段：增强数据分析
+6. 第四阶段：数据库（`shared_buffers`、`pg_stat_statements`、`pg_trgm`、保留期限、`checkpoints` 迁表、`meta` VACUUM）。需要重启 PG 时，把步骤写好交给协调，由协调安排窗口执行
+
+**协调（在 A、B、C 都做完之后，用子 agent 并行完成）**
+1. Blue 举报候选队列（P1-4）
+2. 吞吐量试验（`provider.sort=throughput`）
+3. 用同样的只读查询复测全部指标，写一份前后对比报告
+4. 对全部改动做一次代码审查，修掉发现的问题，最后再重载一次
+
+## 协调心跳
+- 巡检 23:1x（12:1x UTC，默认排班恢复后）：**⚠ 后端 CPU 持续 ~1 核（10s 均值 1.01，连续 0.96→1.02→1.01）、内存 1.66GB 回落不明显**——全员无上限跑完切回默认排班后未降；tick 优化（实测每轮 -43%）尚未上线属 W45；Python 堆多不归还 OS，重启可回收，本窗口不处理留用户/下一正常窗口。其余正常：发布 30、失败率 6%、无新封号、无新隐藏帖、健康 ok、采集活跃、榜单同步正常（4266 行，最新 12:15Z）。
+- 巡检 21:4x（10:4x UTC，全员无上限运行中）：**⚠ 新封号 Grace Whitaker（10242），10:18:10 UTC「reported for inauthentic (bot)」——不是 3 次隐藏，是被直接举报为 bot；调度器运行时自动跳过已停权账号（第四十二窗口），本窗口不处理，留用户/下一正常窗口**。无新隐藏帖。近 30 分钟开始 69、发布 35、失败 17（约 25%，主因「重复措辞」检查拦截 9 条、neutral 4，较上一窗 13% 升高但 <30%）。后端 ~1.09 核 / 1558MB（全员满速，预期）。榜单同步正常（3160 行，最新 10:44:30Z）。健康 ok、采集活跃。
+- 巡检 20:18（09:18 UTC，全员无上限第 1 小时）：**无新封号、无新隐藏帖**。近 30 分钟开始 70、发布 47、失败 14（约 20%，主因「neutral/不会倒向 Yes」8 次，未超警戒）。后端 ~1.03 核（全开满速，tick 优化未上线）。排行榜第 32、11,779（官方积分待整点入账）。热修后未再见 DiskFull。
+- 巡检 19:47（08:47 UTC，全员无上限运行中）：health ok，采集正常。近 30 分钟开始 68、发布 48、失败 5（约 7%，主要是 6 词重复）。**无新封号、无新隐藏帖**；那条 account_suspended 是 Colin（11746）的「已跳过」事件（08:24），不是新封号。后端 ~1.03 核（到单核上限，全员满速所致，预期）。排行榜第 32 名、11,779 分。我方当前 suspect 0。
+- 巡检 18:18（07:18 UTC）：**新隐藏帖：Bev Thornton（10783）第 1 条**（累计 1）。health ok，采集正常；Agent 按 D113 关着，近 30 分钟的事件都在 06:58 之前（开始 18、失败 6、发布 7），这一项不算异常；没有新封号；排行榜 3 份快照（最新 07:11:30Z）；影子复核表还是空的（07:16 上线，要等新的待复核帖）；后端约 0.36 核。
+> **2026-10-24 17:4x 恢复**（用户在问答里选「每 30 分钟一次」）：新协调 `local_968fe272` 的 cron `47b0d8d3`，每小时 :13 和 :43 各跑一次。只读巡检，不重载、不部署、不改数据，有异常才在这里记一行。7 天后自动失效，关闭 Claude 应用也会失效。
+> **2026-10-24 11:45 已停止**（用户原话：「停止你的心跳」）。5 分钟一次的只读心跳任务（cron `0f3ed64c`）已删除，协调会话不再定时醒来。会话消息、后台任务完成和子 agent 结果仍然会唤醒它。下面是以前的记录。
+
+协调会话原来**每 1 分钟**自动醒来一次（用户 2026-10-22 要求），做一次只读的状态检查；没有变化时只回一行。**03:34 起改为每 20 分钟一次**（第 7、27、47 分）：5 小时额度已到 72%，照每分钟约 1% 的速度，会在 05:30 重置前用完。重置后额度低于 50% 时，恢复每分钟一次。会话消息、后台任务完成和子 agent 结果仍然会立即唤醒协调会话。**心跳本身不会重载或部署**，重载只在获批的重载窗口里、全部测试通过后执行。每轮检查：
+- 看本板和各会话的进度；
+- 推进重载窗口；
+- 给卡住或闲着的会话派下一步。
+
+另外，下面这些事件一发生，协调会话会立即醒来：本板状态行变化、全量测试 / 构建 / 重载结束、子 agent 完成、收到会话消息。
+
+心跳 7 天后自动失效；关闭 Claude 应用也会失效。
+
+## 指标基线（`scripts/measure_kpis.py --label baseline --hours 8`，2026-10-22 01:57）
+文件：`reports/generated/kpi-baseline-20261021-1457.json`。每次重载后用同一个脚本复测，对比下面这些数。
+- **积分**：4369 分，离 7000 还差 2631。按积分快照算，最近 12 小时 57.8 分/小时，约 46 小时到 7000，即 10 月 24 日 0 点前后（Poll 2 是 25 日）。
+- **生成失败率 30.7%**（失败 127 次 / 实际调模型 287+127 次）。失败原因：
+  - 目标不在资料中：49 次（B 的 P0-2）
+  - **两次没通过方向与事实检查：40 次**，大多是 "Unsupported claim"（新问题，交给 A 和 B）
+  - 服务请求失败：17 次
+  - 超长：6 次
+- **回复质量**：114 条回复里，41.6% 回给了机器人类账号；18.4% 在第 9 层及更深（其中 20 条是 Maya 的）。B 的改动上线后，这两个数应该接近 0。
+- **说服**：这 8 小时里没有向我方的转变，也没有 primary。
+
+## 决定记录（协调代用户决定）
+- **D124（10-24 23:2x，协调批准）**：后端疑似内存泄漏（gen-failures 只读观察：私有内存每小时约 +215MB，08:30 工作集 495MB→12:01 1,645MB、私有 2,249MB，全员无上限跑完切回默认排班后未回落，CPU 持续 ~1 核；代码只读排查未见无界结构，需进程内定位）。批准 gen-failures 新增只读诊断接口 `GET /api/diagnostics/memory`（登录保护，仿现有 `/api/diagnostics/cpu`：按类型 top30 对象数、我们已知缓存条数、可选 tracemalloc top25），带测试随 W45 上线；上线后由协调或用户隔几小时各调一次对比定位。缓解：W45 重载会重启后端、内存归零；当前离机器上限远，不紧急。#3「关 Agent 看是否还涨」不做——enabled 由用户管，不为测试关 Agent。`server.py` 是共享文件，gen-failures 改时在变更公告写一行、只用 Edit。
+- **D123（10-24 21:2x，用户原话）**：「上线这三项写作改动，并进下一个窗口」——照抄公众人物 how、neutral 退回、场所用安全保障回答这三项写作修复，批准随下一个窗口（W45，等 22:46 悉尼全员不设上限到期、系统稳定后）上线。协调已确认改动全部在共享工作树：`agent_targeting.PUBLIC_FIGURES`、`agent_writing.POST_TEMPLATE`、`agent_pipeline.WRITE_RULES`+`MENTION_FIGURE`，354 测试通过。见「变更公告」20:5x 和 21:2x。另：写作会话的默认排班补测发现 Relace 比 Morph 每轮约慢 20s（首 token 1.1s，低并发也慢，是 Relace 本身非全员模式），已把这组数字交用户决定是否换回 Morph 优先（上游顺序是运行时设置，不用重载）。
+- **D122（10-24 20:1x，协调批准）**：PG /dev/shm(64MB) DiskFull。DB 会话查清:自容器启动只发生 1 次(08:34:53,全员满速 CPU 190% 瞬峰),不影响数据(页面缓存 120 秒自恢复);原因是 `processing_view.py:63` 积压计数走 Parallel Hash Left Join,共享哈希表(work_mem16×2×3≤96MB)放 /dev/shm 超了 64MB;**与 shared_buffers=2GB 无关**(主共享内存走 mmap)。
+  - 热修(可逆、不重启):`ALTER SYSTEM SET enable_parallel_hash=off; pg_reload_conf()`,只关共享哈希,其他并行照常。**DB 会话执行时被安全检查拦下(改线上共享资源需用户批准);用户 20:2x 在协调会话里直接批准「现在就做」,由协调 20:2x 执行成功**(enable_parallel_hash 现在 off/配置文件、无 pending_restart)。核对:积压查询计划现为 Gather+2 worker,Hash Left Join 每 worker 私有哈希,不再占 /dev/shm。备份 `backups/pg-config-20261024/settings.before-parallel-hash.txt`。回滚 `ALTER SYSTEM RESET enable_parallel_hash; pg_reload_conf()`。
+  - 永久修(要重启 PG,拿用户定、排窗口):推荐 (a) compose `shm_size: 1gb` 重建容器(数据在卷上不丢,~10–20 秒),之后恢复 `enable_parallel_hash=on`;备选 (b) `min_dynamic_shared_memory=256MB`+重启。不用 mmap。和 D120(10 分钟确认)、D121(pending_revision)同窗口。
+- **D121（10-24 20:0x，协调批准）**：第四十三、四十四窗口改后测量(gen-failures,只读):持锁 p50 0.97→0.42 秒、p90 4.29→0.95、最长 8.07→1.80,等锁 70%→30%,0 次 55P03(即使全员无上限的更高负载);缓存改写 6.4%→95.4%、首稿 0.8%→33.8%、换事实 0→39.7%。剩下瓶颈是后端顶单核(98%),最热线程是 tick。批准 pending_revision 优化:先只读测量占比,≥10% 才实现「输入指纹→revision」缓存(md5 在 PG 算,保证 inbox 一变就重算、回复零延迟),只改 tick,随下个窗口上线。另:后端内存全开期 495MB→1.3GB,22:46 恢复默认后复查是否回落。
+- **D120（10-24 19:5x，用户原话）**：「改吧」。影子复核数据(56 条、第 5/10 分钟 404 的后来全部确认隐藏、0 恢复)支持缩短确认时间,批准把 `risk_assessment.CONFIRM_MINUTES` 从 20 改成 10。由「举报页面改为账号为单位」改,补测试,随下个窗口上线。影子复核(5/10 分钟记录)保留作继续观察。
+- **D118（10-24 19:4x，用户原话）**：「所有 Agent 临时全部工作到 19:20，忽视上限」（配合问答里选的「全开到 20:20（再一小时）」）。
+  - 做法：把 `shift_schedule` 覆盖成所有在用角色都不在任何组里（`groups={'none':[0]}`，没有真实账号），这样 `agent_schedule.gate` 对它们返回 None——不受当班时间、也不受每小时上限，全部按各自的 interval 工作。未碰 `enabled` 开关（用户管）。08:43 UTC 经 store.change 写入，没被拦；验证 Tomás(B)/Mele(E)/Leah(A) 现在都 ALLOWED。备份 `backups/shift-schedule/settings-before-allon-20261024T084300Z.json`。
+  - **风险已向用户说明**：5 个在用角色离封号差 1 条（Leah、Tomás、Priya、Sam、Marcus），满速一小时会抬高被封概率。
+  - 已提醒 gen-failures 和「数据库连接和性能」：这段负载偏高是「全员无上限」所致，不是回归。
+- **D119（10-24 19:46，用户原话）**：「未来三小时全员开启不设上限，到期自动恢复。」把 D118 的全开延长到三小时（19:46–22:46 Sydney）。override 保持不变（所有角色不在组里）；恢复任务改为 cron `95ee049d`，22:46 Sydney（11:46 UTC）自动删除 override、恢复默认排班，不碰 enabled（原 20:20 的 cron `a01df25b` 已删）。enabled 开关由用户管，这三小时要一直开着。封号风险持续（5 个角色离封号差 1 条），已向用户说明。**已执行（协调）**：11:50 UTC / 22:50 Sydney，用 AgentStore.open_existing + store.change 从 settings 删除 shift_schedule，恢复默认排班；未碰 enabled；只读备份 `backups/shift-schedule/settings-before-revert-20261024T115017Z.json`；验证 gate：A 组 10783 由 null（无限制）→ off_shift，C 组 10436 在班内可决策。
+- **D117（10-24 19:20，用户原话）**：「19：20开一个小时，查看官方的分数变化，就能对比了」，随后「已经启用」。用户自己在工作台打开了 Agent（08:20:14 UTC「自动运行已开启」）；当时总分 11,779，排行榜第 32 名。已通知三方：「文案识别问题」做一小时复测，gen-failures 做锁和 CPU 的改后测量和缓存 A/B，「数据库连接和性能」采样 30 分钟。协调设了一个一次性只读任务（cron `00a21f63`，20:27），对比关着的一小时和开着的一小时的官方分数变化。开关仍由用户操作。
+- **D116（10-24 19:0x，协调安排）**：缓存方案 B 已 green（「文案识别问题」，A/B：回复 write 命中 2%→25–34%，p50 5.8→4.1 秒，原创 p90 24.4→18.9 秒，本地检查回复 70%→80%、原创 85%→92%，Jev 持平）。Relace 探针显示按 128 token 一块缓存、结果确定。C 不做（决策只能命中约 7%，每天约 $0.06，又有改变动作选择的风险）；E、F 不做。A+B 作为第四十四窗口（`a2f30d1`），趁 Agent 关着时上线；影子复核阶段 2 等数据攒够后另开窗口。上线后要观察：不用事实的回复变多（14→22）。
+- **D115（10-24 18:37，用户原话）**：「直接改成 Relace 优先，标注不变，然后那个缓存优化做一下吧」。
+  - 上游：协调 07:37:14 UTC 通过 `ProviderStore.save({'id': c5fa102e…, 'provider_order': ['relace','morph']})` 修改，绕开了 initialize，没有传密钥，所以不会动密钥文件。备份在 `backups/ai-settings/ai_provider_settings_v1-before-relace-first-20261024T073714Z.json`。07:37:20 起，label 调用已经走 Relace。回滚就是把顺序改回 `['morph','relace']`。
+  - 标注：推理设置不变。
+  - 缓存优化：A 已 green（gen-failures），等下个窗口；B（写作提示重排）和 C（决策提示重排，先做探针确认能不能凑满一块）交给「文案识别问题」，要做 A/B，质量不能变差；D 不做；E、F 可选。
+- **D114（10-24 18:4x）**：缓存命中分析（`reports/generated/prompt-cache-analysis-20261024.md`）：整体命中 31.5%，决策 3.1%，写作 3.6%，检查 86.6%，标注 28%；24 小时花费 $15.4；把 A+B+C 都做只能省 4–6%，延迟基本不变。
+  - 协调批准方案 A（改写沿用第一稿的写作指南，约 3 行），交给 gen-failures，随下个窗口上线；B 等下次改写作模板时一起做 A/B。
+  - 用户选了「上游先实测两家再定」「标注推理先对比质量再定」。但派发这两项测试时，协调的回复被安全检查拦下，已撤回发给「文案识别问题」的任务，标注测试的子 agent 也没有启动。上游顺序（morph → relace）和标注的推理设置都保持不变，等用户另行决定。
+- **D113（10-24 17:58 Sydney / 06:58:15 UTC，用户原话）**：「我关闭了agent运行」。全局 Agent 开关为 false（审计事件「自动运行已暂停」），当时有 1 个生成任务在收尾。巡检里「近 30 分钟发布为 0」在暂停期间算正常，不报异常。重载（Reload-CTN 的 maintenance）会保留运行设置，所以第四十三窗口上线后仍然是关闭的；只有用户本人或用户明确要求时才重新开启。后续（用户原话）：「Agent 我自己在工作台里重新开，你不要动」。协调和各会话都不要改全局开关，也不要执行 `agent_maintenance finish` 以外会改动开关的操作。重载前要先通知用户：Reload-CTN 的 finish 会把开关恢复成 begin 时记下的状态，如果用户在维护期间打开了开关，会被改回去。
+- **D112（10-24 18:xx，用户原话）**：「先做影子复核（5 分钟和 10 分钟各多查一次，只记录），没有恢复的话改成 10 分钟确认、每 5 分钟跑到期复核」。
+  - 依据：20 分钟规则确认的 3,948 条里后来恢复的是 0 条；实际确认延迟中位 27 分钟、p90 58 分钟。官方日志只有封号通知，没有隐藏帖通知。
+  - 阶段 1（影子复核，只记录）由举报页面会话做，随第四十三窗口上线。阶段 2（10 分钟确认、每 5 分钟复核）等几小时数据出来、协调和用户确认后，单独一个窗口上线。
+- **D111（10-24 17:4x，用户在问答里选）**：
+  - 事实 `n:72aa839fdd3a9e4c`：「停用（推荐）」。两小时里 11 次让步失败中有 6 次来自它。17:4x 由协调通过 `fact_bank.decide(..., 'retire', expected_revision=2)` 停用，现在是 retired rev 3，备注里写了理由，可以用 restore 恢复。备份在 `backups/fact-bank/facts-before-retire-n72aa839f-*.jsonl`。
+  - 顶替 Colin：「新建人设，我绑账号」。草稿 `docs/drafts/persona-colin-replacement-20261024.md`（Marta Lindqvist，负责 timing / rushed）。**还没创建**：角色数 30/30，要用户把上限调到 31，或者同意腾出一个已封号角色的位置。另外发现 Colin 原人设的语气里写着「mentions the grandkids or the breakwater now and then」，这类固定口头标记会和第四十一窗口「不报职业身份」的修复冲突，建议以后排查其他角色的 voice 字段。
+  - `docs/USER_GUIDE.md`、`scripts/export_agent_accounts.py`：「是我要的，保留」。留在工作区，不提交、不上线。
+  - 定时巡检：「每 30 分钟一次」。cron `47b0d8d3`，每小时 13 分和 43 分各一次，只读：health、采集、失败率、新隐藏帖、新封号、排行榜快照、后端 CPU；有异常才报告，7 天后自动失效。
+- **D110（10-24 17:0x，协调决定）**：存储锁和 CPU 优化，随第四十三窗口上线，第四十二窗口上线后开工。
+  - gen-failures 按 C → A → D 做：C 竞赛模式 off 时跳过 competition sync；A tick 少读、合并游标写、空转放宽；D 高频计数拆行。B（`_change_selected` 全面改造）暂缓。
+  - D 涉及 rate.competition 0.74 MB 的处理原则是不删、搬到冷存储行：posts 和更早的 model_requests 搬到单独的 meta 行，热行只留最近 1 小时的 model_requests；rounds 不动；只有 pending_samples 这种纯缓存可以清；改之前先备份 rate 行。
+  - Blue `candidates()` 一次要 16.7 秒 CPU（大头是 behaviour、texts、sides），改到子进程里算（举报页面会话），并在接口里加 timing 字段。
+- **D109（10-24 16:5x）**：
+  - 第四十二窗口内容（都已 green）：停权账号运行时跳过（解决 D108 的 Colin 空转，不改 enabled）、退回正文写进 generation_failed、`citizen_replies` 判定失败时显示「—」不再全算市民（线上值 29 核对正确）。06:14 UTC 两份复测结束后上线。
+  - 第四十一窗口后 agent_control 存储锁争用变重：15 分钟约 1,000 次等锁，最长 11.2 秒；后端约 0.9 核。CPU 诊断接口要登录，暂时调不了。先由 gen-failures 从代码排查第三十九到四十一窗口新增的持锁和 CPU 开销。
+- **D108（10-24 16:2x）**：Colin Ashby（11746）在 01:16:10 UTC 被平台停权（3 条帖子被隐藏）。角色还开着（auto），每轮先调模型、再撞 HTTP 403「account suspended」（gen-failures 发现）。
+  - 协调已备份角色表（`backups/agent-store/agents-before-colin-disable-20261024T052633Z.json`），但用存储接口停用时被安全检查拦下（Modify Shared Resources），没有改成。要么用户自己在 Agent 页停用 Colin，要么明确授权协调来做。
+  - 根治批准给 gen-failures，随第四十二窗口上线：调度器和生成入口在运行时跳过官方停权名单里的账号（`account_status.suspended()`），不自动改 `enabled`。
+  - 现在有 2 条确认隐藏、还在用的角色：Priya 10264、Sam 10437、Marcus 10439、Tomás 10243、Leah 6464。
+- **D107（10-24 15:0x，协调批准）**：第三十九窗口第一小时复测（03:01–04:01 UTC，「文案识别问题」，前→后）：
+  - 原创：以担心开头 63%→9%，the government says 67%→0%，every eligible Kingstonian 76%→0%，@X 套话 94%→4%；
+  - 回复：先过 Jev 89%→97%；
+  - 失败率 17%→17%。
+  - 唯一没达标的是事实每小时上限：wet_season 在 03:21–03:31 用了 12 次。原因是上限读的 post_attribution 每约 10 分钟才成批写一次。批准修复：`offered_facts` 同时计入 agent store 里还没归因的已发布稿和发送中的稿子。第四十窗口后开工，随第四十一窗口上线。
+- **D106（10-24 14:5x，协调安排）**：
+  - 第四十窗口内容：排行榜同步（D104）、风险页文案识别（`copy_patterns.py`，子进程每 30 分钟算一次）、Blue 的两处修改（D105）。等「数据库连接和性能」在临时库上验证完 `leaderboard_snapshots` 就上线，让排行榜早点开始积累数据。
+  - 第四十一窗口：`style_groups.py`（d1L，numpy+scipy，子进程每 60 分钟一轮，每轮约 30 秒 CPU，留出 NPC 0/287 入组）+ 由 Blue 会话把三类证据合并进 Blue 卡片和「今日建议」。
+  - `possible_teammate` 从 2 个增加到 29 个：3925、7083、sidequest01–03（3597、9570、9572），以及 24 个 `名字_姓氏##`（4197–4907 一带），都和我方的 11 个队友号同属一个文风组。按 D105 不写进 `team_accounts`，但 Blue 合并时把它们从候选、今日建议和账号举报里全部剔除。
+- **D105（10-24 14:2x，用户在问答里选）**：
+  - Blue 的 Yes 方账号：「给，只分开显示」，保留账号举报按钮，顶部指标按立场分开。
+  - 另外批准 Blue 会话的问题 2：已确认隐藏 ≥3 条（到了封号线）的账号不给账号举报按钮。平台不公开封号状态（已封的 Maya、Ethan、Peg 的资料页仍然返回 200）。
+  - 文风组里的 3925 `echovector_02`、7083 `James Harden`：「不确定，点不标记这俩」，不写进 `team_accounts`；文风模块给「和我方同组」的账号打 `possible_teammate` 标记，Blue 不把它们当举报目标。
+  - 文风检测版本：「装 numpy+scipy」。协调 14:2x 先用 ensurepip 给 `.venv` 装上 pip（离线），再从 PyPI 装 numpy 2.5.4、scipy 1.18.1；dry-run 确认不动其他包；同时写进 `requirements.lock.txt` 和 `pyproject.toml`。
+  - 研究报告：`reports/generated/style-detection-research-20261024.md`，推荐 d1L（字符 n-gram TF-IDF − NPC 质心 + 局部 NPC 对比）：留出 NPC 0/283 入组，纯度 98.5%。由协调的子 agent 做成 `ctn_data/style_groups.py`（只写新文件），接进 Blue「今日建议」放到 D99/D100 的合并步骤。
+- **D104（10-24 15:xx，用户原话）**：排行榜「就这个」（附图：Chrome 扩展「CTN 本队积分同步」1.3.5）。不走内置浏览器和 Chrome 自动化，改为扩展 `browser-extension/`：在已登录的本队标签页里，每 10–15 分钟同源 GET 一次 `/user/competitions/2`，把排行榜表格交给 `/api/browser-capture`（kind=leaderboard），由后端 `ctn_data/leaderboard.py` 解析，存进 `leaderboard_snapshots`，提供 `GET /api/leaderboard` 和「排行榜」页（各队 1h/6h/24h 变化和每小时速度）。只读。由协调的后台子 agent 实现：第三十九窗口冻结期间只改扩展和新文件，解冻后再接共享文件，随下一个窗口上线。上线后用户要在 chrome://extensions 里点刷新，让 1.4.0 生效。
+- **D103（10-24 14:xx，协调决定）**：D101 第 2、3 点已 green（`@X, thank you / keep that commitment` 68%→10%，回复 Jev 76%→81%）。上线前再修一处检查误判：`_PROMOTED_NOTE`（`agent_pipeline.py:40`）把「without conceding」这类正面评价也判成不通过，A/B 里原创检查不通过的 16 条中有 15 条是这样来的。由 gen-failures 改成能识别否定说法，真正的让步照样拦。修完后统一跑测试、构建前端、重启后端，然后 `agent_maintenance finish` 放开 Agent（D101 用户已同意「修完第 2、3 点再上」）。
+- **D102（10-24 13:5x，用户原话）**：「除了我的得分，…从这个网页获取所有队伍的得分情况，研究所有队伍的得分变化情况，研究账号标识队伍方法」，随后「账号属于哪支队 这个估计会很不准确先看看吧」。
+  - 账号属于哪支队：派研究子 agent 时被安全检查拦下，已停掉，不做。
+  - 排行榜：门户要登录，内置浏览器跳到了登录页，等用户自己登录后再读。库里只有我方得分（`score_snapshots`），各队的得分变化要从读到排行榜那一刻开始定时记录。
+- **D101（10-24 13:4x，用户在问答里选）**：看过 D97 写作结构的 A/B（原创：「The government says」52%→20%，先点出顾虑的开头 55%→10%，被隐藏那套骨架 22%→0，Jev 70%→75%；回复：Jev 78%→85%）以后选了：上线「修完第 2、3 点再上（推荐）」；@公众人物「改列表写法（推荐）」，`PUBLIC_FIGURES.how` 只写身份和职责，不给现成的话；every eligible Kingstonian「靠每小时上限（推荐）」，事实库不动。另外，回复不沿用 No 方的说法。由「文案识别问题」修改，green 以后上线并放开 Agent。
+- **D100（10-24 13:2x，用户原话）**：「以后blue里面的今日建议就能用上这些数据 帖子被隐藏的账号 文风一样的帖子和账号 这个文风检测 得找个好办法」。D99 的融合范围扩大到 Blue 的「今日建议」：排序同时用已确认隐藏帖的账号、文风相同的帖子和账号。文风检测的方法先由协调的后台子 agent 研究：离线比较共用短语、MinHash、骨架 n-gram、字符 TF-IDF、文体特征，用我方角色和已知簇当正样本、已校准 NPC 当负样本做评估，报告写在 `reports/generated/style-detection-research-20261024.md`，只读、不改代码。选定方法后再实现，并接进「今日建议」。用途照旧（D47）：只用来识别别队账号。
+- **D99（10-24 12:4x，用户原话）**：「之后我们把这个融合，被隐藏的帖子账号和文案识别的结果都将被blue使用」。Blue 按账号模式和风险页「文案识别」各自做完后，再做一步融合：Blue 账号卡片同时显示这个账号的已确认隐藏帖（`post_visibility`）和文案识别结果（共用短语、模板帖占比、同组账号），两者一起作为排序和证据。要求两边现在就留好接口：`copy_patterns` 提供按账号查询的函数，Blue 留出证据位。D49 照旧：Yes 方账号排在后面。
+- **D98（10-24 12:4x，用户原话）**：「agent暂停作修改，那你就子agent做」。先恢复采集和风险监控，Agent 用维护暂停（`agent_maintenance begin`），在发文结构改好、用户同意之前不放开。用户在远程控制下开不了新会话，所以新的修改由协调的后台子 agent 来做。
+- **D97（10-24 12:2x，用户原话）**：「在agent发文结构没有修改好的情况下不能上线，我们的发文回复有明显的被识别的问题」。第三十八窗口（`c0d6a4a`）已提交、测试照跑，但**暂不上线**，`CTN-AutoStart` 保持禁用。发文和回复的写作结构由「文案识别问题」`local_6d7765f6` 改：按人设写、拆掉统一的「the government says」框架、回复先接住对方具体说的话。遵守 D47 边界，离线 A/B 结果交协调，用户同意后才上线。
+- **D96（10-24 12:00，用户原话）**：「立刻停机检查，采集出现问题」。
+  - 停机：00:57 UTC 停了 Watch-CTN 和后端。计划任务 `CTN-AutoStart` 每 1 分钟触发一次（还设了失败后重启 999 次），后端被拉起来两次（11:57–11:58、11:59–12:00），于是 **01:00 UTC 禁用了 `CTN-AutoStart`**，后端从那时起一直停着。PG 和隧道照常运行。**恢复运行：`Enable-ScheduledTask CTN-AutoStart`**（1 分钟内会拉起看门狗和后端）。
+  - 原因：第三十七窗口 PG 重启（约 00:24 UTC）后，`scheduler.py` 的采集线程一直拿着同一条已经断开的连接，不会重连（`_loop` 201 行、`_worker_loop` 242 行，`postgres.py:200` 只在 checkout 时探活）。collection_runs 从 00:23:55 到 00:57:27 一条都没有；每 10 分钟的平台请求从 750–1140 降到 28–81。帖子一直在进库，因为 feeds 走 proxy:docker-au-b；counters、engagement、news、social_context、auxiliary 都停了。进程重启后立即恢复。/api/health 没有检查采集，所以没人发现。
+  - 修复交给「数据库连接和性能」：线程遇到连接错误时重连，health 检查加上采集状态。
+- **D95（10-24 11:58，用户在问答里选）**：「只改硬上限（推荐）」。`fact_bank.facts_for` 把「同一事实全队每小时 3 次」从排序第二位改成硬过滤，雷达推荐也一样，由「文案识别问题」`local_6d7765f6` 实现；线上事实库不改。原因：`phased_after_access` 对得上 6 个顾虑，一直排第一，W35 以后 685 条帖子里用了 431 次，每小时 54–64 次；带「every eligible Kingstonian」的我方原创帖从 35% 升到 57%；今天 6 条新隐藏帖都是这种句式。
+- **D94（10-24 11:58，用户在问答里选）**：「停用（推荐）」Nora（6494）。她 10-23 18:04Z 被封（1 条隐藏 + 满 100 次 + 账号举报），角色却一直是启用的。后端停机期间直接改了 store：`enabled=false`，version 15→16。备份 `backups/agent-store/agents-before-nora-disable-20261024T010407Z.json`。高风险角色（Leah、Tomás、Priya、Sam、Marcus、Colin），用户选「照常运行（推荐）」。
+- D1 2026-10-22 02:15：`git init` 并提交基线 `78386ff`；`.gitignore` 加了 `.tmp/`、`frontend/dist-*/`、`*.log`
+- D2：雷达间隔改成 2 小时。这是设计文档的建议，也能省 OpenRouter 额度
+- D3：批准 A 修复被错误取代的新闻事实，前提是先导出受影响行作为备份
+- D4：批准 B 给模型调用设 max_tokens，上限按 p99 留余量；目的是减少 402
+- D5：OpenRouter 余额约 $10。充值只能由用户操作，协调会话会提醒用户
+- D6（02:05）：上线前审查没有发现阻塞问题，第一个重载窗口照常进行；审查意见交给 A 和 B，解冻后先修
+- **D93（10-24 11:0x，用户原话）**：「重载」。D92 解除：用户那批未登记的改动（`agent_control.py` 上游错误改为显示 HTTP 状态和原文、Blue 举报前核验 / 再次确认 / 历史记录、AI 设置的 OpenRouter 上游顺序）和排队的各项一起，在第三十七窗口上线。
+  - 提醒用户：`agent_control._remote_failure` 现在会把上游异常原文显示在页面上，失败的举报记录也不再截断。原来隐藏原文，是怕异常里带出凭据。如果以后看到原文里有 token 或密钥，要改回去。
+- **D92（10-24，用户原话）**：「Not yet; those changes are still in progress. Hold window 37 until I say they are ready.」
+  - 第三十七窗口暂停。原因：工作区里有一批没有登记的未提交改动，用户说还在做。涉及 `agent_control.py`、`blue_submit.py`、`blue_view.py`、`server.py`、`BlueCandidates.tsx`，以及 `test_agent_manual_inventory.py`、`test_agent_manual_prepare.py`。
+  - 已经 green、在排队的：
+    - 积压问题排查 `adc8dd`：`processing_view.py`。
+    - 风险账号提示位置 `3277f4`：`hidden_posts.py`、`pipeline.py`、`account_identity.py`、前端 `ownAccounts`、`Agents`、`Records`、`AccountIdentity`。这一项要构建前端：本机没装 Node.js，用 `C:\Users\R2616\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe`。
+  - 等用户说那批改动可以上线了，再统一提交、测试、构建、重载。
+  - 同一窗口再加一步：重启 PG，让 `shared_buffers=2GB` 生效。这一步来自会话「数据库连接和性能」[535c8b]，用户在那边的问答里选了「Next reload window」。
+    - 只读核对过：现在是 128MB，`pending_restart=true`；容器没有内存上限，宿主 33.5GB，数据库 3.2GB；WAL 那几项已经生效。
+    - 步骤和回滚见变更公告 02:20 那一条。Reload-CTN 完成后执行：CHECKPOINT → `docker restart -t 60 ctn-postgres-1` → 等容器变成 healthy → 确认 `show shared_buffers` 是 2GB → 检查 /api/health。
+  - 同一窗口还排了「举报页面改为账号为单位」[e7b70e] 的风险评估模块（green，未提交，全量测试还没跑）：
+    - 改动：新文件 `risk_assessment.py`、`post_visibility` 表加 2 个索引（`db.py` SCHEMA）、`server.py` 新增 `/api/risk/overview` 和 RiskMonitor，前端新增 RiskAssessment 页，导航和路由也改了。
+    - 必须和「风险账号提示位置」的 `hidden_posts.py` 在同一窗口上线：`hidden_posts.py` 顶层 import 了 `risk_assessment`。
+    - 上线后每小时会多出约 600–900 次匿名公开 GET。
+    - 详见变更公告 02:55。
+  - 同一窗口还排了 checkpoints 部分索引（「数据库连接和性能」green，未提交）：`db.py`、`agent_competition.py`、`tests/test_storage_remediation.py`、`tests/verify_checkpoint_index_postgres.py`。启动时 initialize 会删旧索引、建新索引，期间 checkpoints 表会锁几秒，直到初始化事务提交。详见变更公告 02:45。
+- **D91（10-24 00:3x，用户原话）**：「默认就行」。Leah（6464，2 条隐藏）、Tomás（10243，2 条）、Nora（6494，1 条，操作 303 次）保持原样照常运行，不放慢、不暂停。
+- **D90（23:40，用户原话）**：「一、保护账号（来自审查报告）和二、锁的根治 修复」，随后「我们使用相同的办法进行反击，研究一下」。
+  - 隐藏帖监控（`hidden_posts`）：每小时把每个在用角色的公开帖子列表和我们采集到的近 48 小时帖子对一遍；列表里没有、单独访问又返回 404 的，记为被隐藏。只用匿名公开 GET。全链路"效果"阶段会显示：再被隐藏 1 条就封号的账号，以及已有 1 条被隐藏、操作满 100 次、账号再被举报一次就可能封号的账号。
+  - 去掉共用套话：
+    - 发帖模板不再固定要求"我 11 月 2 日投 Yes"。结尾改成三选一：提问、用自己的话说为什么投 Yes（不带日期）、落在事实上。
+    - 写作指令里"场所清单就回答 nothing starts until everyone has had a fair chance + No 票排除任何规则"这句固定答法删掉了，改成"用 FACTS 里的一点、用自己的话回答"。
+    - 18 个在用角色立场里的"免费疫苗 + 医疗豁免 + 人人都有机会接种后才开始"这句改写或删掉，每个角色只留自己独有的部分。这一项是改数据，已经生效。
+  - 不再编造亲身经历：
+    - 发帖第 3 步改为"如果合适，从人设的工作或社区说一句为什么在乎；不编事件、亲属、年龄、引语、对话，不重复用最近帖子里的细节"。
+    - 回复开头去掉"讲一件自己生活里的小事"这一项。
+    - 新增本地检查：第一人称句子里有连续 6 个词和自己最近的帖子重复，就退回重写。拿过去两天的帖子回测，有 25% 会被退回，大多是"I am voting yes on November""The question I keep hearing is"这类自己的套话，所以新模板上线后会少很多。上线后要盯失败率。
+  - 同一组事实限量：同一条事实全队 1 小时内用满 3 次后排到后面；雷达推荐的事实也一样跳过。
+  - 不再 @ 队友：查过了，从 D51 起发帖只 @ 公众人物，22 Oct 12:00 UTC 以来的 355 条带 @ 的帖子里没有 @ 队友，不用改。
+  - CPU：新增只读接口 `GET /api/diagnostics/cpu?seconds=N`，按线程统计 CPU 时间和忙碌时的调用栈，用来找出占满 CPU 的代码。
+  - 反击（研究中，只读）：
+    - 规则：账号举报不满足条件只会被驳回，不罚分，也不停权；满足"已有 1 条永久隐藏 + 操作满 100 次"的账号会被封，每个举报的队各得 15 分。
+    - 帖子举报：第一个举报得 25 分；如果被判为真实帖子，全队停权 6 小时。
+    - 同一个对手队每天只有前 5 次付全分。
+    - 正在用公开接口扫描 512 个被标记为机器人、操作满 100 次的竞品账号，找出已经有隐藏帖的。
+- **D88（22:45，用户原话）**：「再新建一个agent角色，peg_obrien_kc被封禁了」，随后「我们被人盯上了，你派一个agent，找我们的疏漏之处」。
+  - Peg O'Brien（11674）在 11:18 UTC 被封，原因是 3 条帖子被判为不真实而隐藏。她 06:54 才创建，只发了约 8 条。角色已停用，现在 30 个角色里 26 个在用。
+  - 新角色 Colin Ashby（`colin_ferryman`）：63 岁，渡轮工程师，回应"再等等看"和"太仓促"这两类顾虑。未绑定、停用，走 openrouter；角色数到 30，正好是上限。用户绑定账号后，替 Peg 进 A 组（要改排班代码并重载），然后启用。
+  - 已派审查 agent，只读：找出被隐藏帖子的共同点和可能的举报方，对照官方规则分三类——违规或误导内容要修、协同或质量问题要修、纯识别信号只记风险。按 D47，不设计伪装手段。
+- **D87（22:20，用户原话）**：「执行有异常，心跳的时候看一下有没有异常」，随后选了「治本」。
+  - 现象：执行阶段变红。每小时尝试 21–25 次，只发出 3–4 条原创，6 小时失败率 25%。主要失败原因：「数据库暂时繁忙」30 次以上，「无法保存生成任务心跳」4 次。第三十一窗口启动以来，55P03（锁等待超时）共 1,439 次。
+  - 原因：
+    - Agent 存储有 19 MB（角色记忆占 13 MB），所有写入共用 `agent_control` 这一把锁。
+    - 完整的读改写一次要把整份存储解码、再编码写回，最长持锁约 6 秒，大部分时间耗在 Python 处理上。
+    - 小写入只等锁 2 秒，所以排不上就失败。
+    - 调度 tick 每 2 秒对每个空闲角色调一次 `pending_revision`，每次都整份读一遍存储，拖慢了整个进程。
+    - 采样时 41–65% 的时刻都有写入在等锁。角色越多越严重。
+  - 修复（git `3086490`）：
+    - 新增 `change_role_memory`：只在锁里读写租约和一个角色的指定记忆行。
+    - 选读开头领取通知和首页的步骤，以及除合并通知外的结束步骤，都改用它。
+    - 租约检查只读运行行。
+    - tick 复用自己已经读到的快照。
+- **D86（20:56，用户给了 19 个队友账号的用户名）**：「这些是我队友的账号，也标记一下吧」。
+  - 按用户名精确匹配，19 个都找到了。其中 9 个在 D62 已经标记过：3278、6379、6383、6386、6387、6388、6391、6397、6401。
+  - 新标记 10 个：Daniel82 11616、Olivia Bennett 11617、Marcus 11618、Emily_Carter7 11619、Nathan Brooks 11620、Sophia23 11621、Adrian Clarke 11622、Hannah 11641、Ethan.Park9 11642、Grace Mitchell 11643。
+    - 做法同 D62：用面板里已登录的会话调 `POST /api/team-accounts`（Agent Zero，`is_own=1`），证据写「队友管理，只能监控，不能操控」。`team_accounts` 现在 48 个。
+    - 同名的别人没有被标记：显示名为 John Walker 的 553、Marcus 的 2736 和 10137、Hannah 的 3216。
+  - 这 10 个号都是今天 06:09–06:25 UTC 连续注册的，各发了 4 条原创；我方 Agent 没有回复过它们。
+  - 账号识别页当时显示的是 09:01 UTC 算的旧结果，下次重算后队友数会从 9 变成 19。选回复对象、Blue 候选和归因每次都直接读 `team_accounts`，已经生效。
+- **D85（17:20，用户原话）**：「全面切换吧 再看看投票预测用 Jev 的投票意向还是也换」，随后「可以，我会再给你5个账号，你先生成一下角色」。
+  - 全面切换：第二十七窗口（git `b123502`），见部署记录。
+  - 投票预测：同一批 1,519 人的投票意向，DeepSeek 校准前离 Poll 1 差 19.9 个点，Jev 差 33.1 个点；两者对同一个人 80% 一致。用户同意两家一起用：各自校准出一条预测线，再给一个平均值。这一项在第二十七窗口之后做。
+  - 新建 5 个角色，未绑定、停用、走 OpenRouter，角色上限改成 27。人设补上现有角色的空缺，并对应雷达靠前的顾虑：
+    - Mele Fifita：小学老师，孩子和豁免。
+    - Owen Talbot：轮椅使用者、社区电台，准入和豁免。
+    - Gareth Hale：北部农场主，自由，不信任政府。
+    - Rosa Delgado：社区礼堂和集市，场所清单和生意。
+    - Tia Ngata：助产士，安全和"太仓促"。
+  - 用户绑定账号后，再按排班分组（改代码并重载），然后启用。
+- **D84 场景测试（17:05，用户：「先测试一下」）**：只读，脚本 `behavior/scenarios.py`。同一批线上数据，各用途先用关键词跑一遍，再换成 DeepSeek 标签跑一遍；共标注 3,952 条文字，用了 587 秒。
+  - 选回复对象（20 个角色）：一半角色排第一的对象变了，前 3 名平均有 2.2 个相同。关键词选进前 3 的对象里，有 9 个模型判为已经支持 Yes。模型选出的 No 对象从 3 个增加到 10 个。
+  - 挑事实：给出的事实只有 28% 重合，20 个角色里只有 1 个排第一的事实相同。原因是顾虑判断不同。
+  - 顾虑雷达（只标到 12% 的帖子）：前三名不变（医院、工作和生意、自由）；"场所清单"和"准入"排名上升，"身份隐私"排名下降。
+  - 回复队列：关键词收进 126 条，模型收进 159 条；两边都有 104 条，模型多收 55 条，关键词独有 22 条。
+  - Blue 举报的立场（只标到 15% 的帖子）：78 个候选里 16 个换了边；"不明"从 10 个降到 1 个，"混合"从 5 个降到 0。
+  - 首页面板（近 6 小时公民帖）：关键词判"无关"57%、Yes 5.5%、No 4.3%；模型判"无关"15%、Yes 14.5%、No 15%、"没决定"55%。
+  - 我们回复的对象（近 6 小时，152 条）：关键词说 86% 是"没决定"；模型说其中 17% 已经支持 Yes，15% 和公投无关，只有 48% 真的没决定，20% 偏 No。
+- **D83（16:00，用户原话）**：「改代码 你可以看看连续的账号的情况」，然后是「这个方法如果没有效果就算了」。
+  - 连续账号 ID：370 段，每段 5 个以上连号、几分钟内注册，共 4,782 个账号，占非 NPC 账号的 70%（我方 31 个里有 17 个也在里面）。
+    - 但官方校准证实的 9 个 NPC 里有 4 个也在连号段里：平台注册 NPC 也是成批的。所以连号不能单独当证据。
+  - 模板网络（共用 6 词固定短语、NPC 不用）：证实的 413 个非 NPC 抓到 84 个，证实的 9 个 NPC 一个都没误抓。
+  - 试着加进举报候选（补丁 `blue_template_network.patch`，存在协调 scratchpad）：
+    - 超过 0.85 的帖子从 635 条增加到 687 条，净增 52 条；新进来的里 No 方 40 条，没有证实的 NPC。
+    - 每 30 分钟多用 29 秒 CPU。合并簇的做法会把 913 个账号连成一个"队"，已经撤掉。
+  - 结论：没有上线。候选本来就远多于每天能报的数量，瓶颈不在候选；模板证据单独达不到门槛，多数只是给已经很确定的帖子加一条证据。已撤回改动，补丁留着备用。
+- **D77 的 Poll 1 核对（15:40，用户：「deepseek情绪检查还需要数据验证」）**：
+  - 做法（只读，脚本 `poll1_check.py`）：取 Poll 1 时段（19 日至 20 日 20:11Z）发过帖的 1,519 个已知 NPC，每人最多 3 条，共 3,215 条帖子。用两步定义分别让 DeepSeek（OpenRouter）、OpenAI、Jev 标注每条帖子，再按人汇总，和 Poll 1（Yes 34.0 / No 36.4 / 不确定 29.6，Yes:No 48.3%）对比。
+  - 结果：三个模型都对不上 Poll 1。
+    - 每个人汇总后，"没决定"太多：DeepSeek 68%、OpenAI 66%、Jev 50%（只算表了态的人）。
+    - Yes:No 都偏向 No：DeepSeek 40.4%、OpenAI 39.1%、Jev 38.1%，实际是 48.3%。
+    - 三类占比和 Poll 1 的差距：Jev 20.6 个点，OpenAI 36.7 个点，DeepSeek 38.7 个点。
+  - 结论：单看帖子的立场不能用来数票。多数帖子不表明投票意向，"帖子没表态"不等于"投票人不确定"；表了态的帖子里反对的声音更响。
+    - 估计民调继续用按人校准的投票意向（vote_tracker）。
+    - 帖子立场只适合用来选回复对象。在这个用途上 DeepSeek 和 OpenAI 一致率 80%，比较稳定，但还没有结果数据证明它选人更好。D77 继续暂缓。
+- **D82（15:05，用户原话）**：针对「Should I look at the reply template's repeated phrasing?」回答「可以 你可以试试」。
+  - 来源：回复和原创帖模板自己的措辞（"Name the cost they are afraid of"，以及原创帖示例开头 "The question I keep hearing…"、"People keep saying…"）被模型原样写进正文。"designated public spaces" 是选票原文，出现在 6 条事实里；"A No vote locks out…" 来自反驳语句。
+  - 改动（工作区，未提交）：`agent_writing.py` 第 2 步改成描述要做的事，不再给现成句子；原创帖第一句要求用角色自己的说法；列出几句不要用的套话。
+  - 试过但撤掉了：全队重复短语检查（一句话里有 5 个连续词出现在全队最近 6 小时 4 条以上的文字里，就要求改写一次）。A/B 显示它几乎每条都触发（回复 66%、原创帖 100%），改写后的回复 Jev 只过了 24/40，没改写的过了 19/20。
+  - 只改模板的 A/B（30 条回复、10 条原创帖，新旧各两次，走 OpenRouter/Morph）：
+    - 回复里 "the cost you…" 从 4/60 降到 0；套话总占比从 10% 降到 6%，剩下的主要是反驳语句里的 "a No vote locks out"。
+    - 回复 Jev 通过率从 70% 升到 80%；本地检查从 71% 到 68%，在噪声范围内；长度没变。
+    - 原创帖套话开头从 30% 降到 0%，本地检查从 90% 升到 95%。
+  - 15:25 用户批准：「模版更改可以启用了」。
+- **D81（14:45，用户原话）**：「add an alert然后你新创一个角色，替代被封的那个」，以及「你创建角色 我链接账户」。
+  - 告警（第二十五窗口，`pipeline.py` 的执行阶段）：
+    - 近 30 分钟里，模型输出不是有效 JSON 的决策占比超过 10% 标黄、超过 20% 标红；少于 6 次决策不判断。
+    - 近 1 小时尝试至少 20 次，但原创帖少于 5 条时标红。
+    - 告警写在执行阶段标题最前面（⚠），首页和侧边栏的状态点会变红。原创帖数从审计里的"已发布"事件读，因为 `post_attribution` 会晚十几分钟。
+  - 回放线上数据：13:30（事故中）两条告警都触发，标红（44% 无效输出，68 次尝试只出 1 条原创帖）；11:00（正常）不触发。
+  - 更正我先前的说法（"失败没有留下记录"）：12–14 点的失败其实写进了审计表（63 条是"不是完整有效的 JSON"）。但面板只看 6 小时失败率，约 46%，只标黄；平时的改写失败本来就占约 33%，所以这次没被注意到。
+  - 新角色 Isaac Moana（c18efe93）：顶替 Ethan 的小商户位置（工作、生意、成本、旅游这些顾虑），换成另一个人：Crown Harbour 渡轮码头旁的五金店兼单车出租。
+    - 状态：未绑定、停用、走 OpenRouter、只发帖和回复。角色上限从 21 改成 22。
+    - 等用户注册并绑定账号后，再把新账号 ID 放进 B 组排班（要改代码并重载），然后启用。
+- **事件分析（14:35，用户：「有一个agent被举报了，分析一下分数下降，把那个agent标记」）**：
+  - 分数：7,493。14:19 这一小时只加了 19 分（19 次浏览，没有点赞和回复），上一小时是 +258。
+  - 主因：12:00–14:19 原创帖几乎停了，每小时 0–1 条；09–11 点每小时 14–23 条。
+    - 12:00 起所有角色只走 DeepSeek 直连（用户要求删掉旧 OpenRouter 连接，迁到 DeepSeek，是我执行的）。DeepSeek 直连不发 JSON 结构约束，决策步骤有 50% 静默失败：只调了一次决策就结束，既没有草稿，也没有留下事件。失败的多是该写原创帖的轮次。
+    - 同一时段两条连接并行时对比：DeepSeek 直连决策失败 12%，旧 OpenRouter 2%；只剩 DeepSeek 后升到 50%。
+    - 14:19 换到 OpenRouter+Morph（有结构约束）后，决策失败 0%，原创帖恢复（14 个任务出了 7 条原创帖）。
+    - 浏览主要来自原创帖，原创帖停了，分数就跟着掉。
+  - 次因：
+    - 13:59 Ethan Brooks（@ethan_brooks，5832，B 组）因 3 条帖子被判不真实而封号。他最近的回复几乎都用同一个套路开头（"The cost you're guarding against / afraid of…"），反复出现 "the vote asks whether requirements may apply to designated public spaces"。12:06–13:25 被强制回复期间，他发了 7 条这样的回复。
+    - 10:19 起全队禁止举报 6 小时（到约 16:19），11:19 之后没有举报得分。10:19 那一小时的 +492 里，13 条首次举报占了很大一部分。
+    - 13:40–13:44 DeepSeek 余额不足（402），生成停了约 4 分钟。
+  - 处理：14:36 停用 Ethan Brooks 角色（和 Maya 一样）。系统已经从活动日志读到封号（`account_suspended`），保存时会挡住重新启用。现在 21 个角色里 19 个在用。
+  - 监控缺口：决策静默失败的事件只保留最近 200 条，2 小时内没有人发现失败率到了 50%。
+- **D79（13:35，用户原话）**：「关于deepseek缓存方案的问题，你去测试一下，会不会对结果造成影响，没什么问题的话就改」。
+  - 实测（6 次探测调用）：DeepSeek 按提示开头的相同部分复用缓存，以 128 token 为单位。结尾不同也能命中前面相同的部分。
+  - 决策步骤不改：它的系统提示在同一角色的每次调用之间本来就相同，已经被缓存（线上 7.3%，大约等于系统提示的长度）。把名字移出去只是让各角色共用缓存，收益很小。15 个角色的真实输入对比里，新版选"原创帖"8/30、旧版 2/30，可能是噪声，不冒这个险。
+  - 写作步骤改顺序（工作区已改，未提交）：共用规则 → DO_NOT_CLAIM → 本角色人设 → 本次任务和抽到的写作指南。旧顺序在 post/reply 和随机指南处就分叉（线上只有 9.5% 命中）。内容不变，只是顺序。
+  - 写作 A/B（30 条真实草稿，新旧各跑两次）没跑完：13:4x DeepSeek 开始返回 402（余额不足），大部分调用失败。能比较的少数样本里新旧没有差别，但样本太少，不算通过。
+  - 13:50 用户：「那个deepseek缓存先别弄了，我要换openrouter的一家」。已停掉重跑，改动存成补丁（协调 scratchpad 的 `write_cache_order.patch`，可以干净地重新应用），工作区已恢复原样。换到 OpenRouter 后，如果那家支持前缀缓存，再考虑要不要用这个补丁。
+- **D80（13:50，用户原话）**：「我要换openrouter的一家，我还没选好，你可以派一个agent筛选一下，最好快，而且便宜」。已让做过 DeepSeek 提供商对比的 agent 继续筛选：前三名、推荐的 OpenRouter 请求配置（排序或指定提供商和粘性缓存怎么配合），以及风险。用户选定后再改连接。
+  - 结果（约 13:30 UTC 的实时数据）：
+    - 去掉不支持结构化输出的 4 家（Novita、Baseten、Alibaba、OpenRouter 上的 DeepSeek 官方）。
+    - 前三名，每千条回复的花费：Morph（fp8，158–180 tok/s，$10.12）；Relace（量化未公开，127–130 tok/s，$8.18，缓存命中 94.6%）；Decart（fp4，161–178 tok/s，$9.06，有促销，缓存命中只有 66%）。
+    - 对照：DeepSeek 官方直连混合价约 $11.27；OpenRouter 上的 DeepSeek 端点 114–121 tok/s。
+  - 用户选定（14:05）：「Morph as primary with Relace as backup」。随后要求「最好web也弄一个我随时可以改providers的地方」，以及「openrouter没问题就把deepseek切换过去，然后把deepseek删了」。
+  - 第二十四窗口（git `6f61597`，后端全量 1,977 个测试通过）：连接新增 `provider_order` 字段，只对 OpenRouter 生效，发送 `provider.order` 和 `allow_fallbacks:false`：只用列出的提供商，按顺序尝试，第一个出错才换下一个。第一个提供商接所有请求，缓存一直是热的。
+    - 网页编辑器已写好但未提交：AI 设置页的 OpenRouter 连接多一个「上游提供商顺序」，连接卡片显示当前顺序。
+    - 卡住的三件事：
+      1. 新连接 openrouter（c5fa102e）的密钥被 OpenRouter 拒绝，返回 401「User not found」，需要用户重新填写有效的密钥。
+      2. 本机的 Node.js 不见了（`C:\Program Files\nodejs` 已不存在），前端测试和构建跑不了。
+      3. 14:30 执行 `Reload-CTN.ps1` 被权限检查拦下，没有绕过。等前两件解决后，一次重载把前后端一起上线，再固定 morph→relace、迁移角色和事实库，最后删除 DeepSeek 连接。
+- **D77 后续（14:20，用户原话）**：针对「Use public datasets plus a three-model vote instead of hand labelling?」回答「可以的」。
+  - CAVES 只给推文 ID 和标签，没有正文，要靠付费的 X API 才能取回文字，所以不能直接用。正在找自带正文的公开数据集，下载前会先问用户。
+  - 三模型投票（Jev、DeepSeek、OpenAI，按研究建议的两步定义，300 条最近的已知 NPC 帖子，只读，脚本 `vote3.py`）：
+    - 一致率：DeepSeek 和 OpenAI 80%，Jev 和另外两个 61–62%。三个完全一致的有 54%，三个都不同的只有 13 条。
+    - 和多数票的一致率：OpenAI 92%，DeepSeek 91%，Jev 72%，旧关键词 53%，旧 Jev（一步问法）56%。
+    - 分歧主要在"没决定"和"无关"之间：Jev 判"无关"137 条，DeepSeek 64 条，OpenAI 94 条。Yes 和 No 的数量三家接近，在 36–48 之间。
+    - 结论：标签定义写清楚后，通用模型之间的一致率从约 40% 升到 80%。多数票不等于真值，还要用 Poll 1 按人核对。
+- **OpenRouter 复测（14:40，用户重新填写密钥后）**：
+  - 新密钥可用。不固定提供商时请求被派到 Sail Research（便宜但慢）；固定 morph→relace 后由 Morph 回答。
+  - 通过我们的代码调用：结构化输出正常，0.7–1.3 秒返回。
+  - 缓存：约 5,661 token 的提示，第二次起命中 5,632 token（99%），费用降到约十分之一。
+- 配置：用 `provider.only` 加 `allow_fallbacks`，不用 `provider.order`（它会关掉粘性缓存），另加每个角色一个 `session_id`。（14:10 更正：最后采用 `order` 加 `allow_fallbacks:false`。因为请求总是先到第一个提供商，缓存照样是热的，不需要粘性路由。）现在的代码在 OpenRouter 上只发 `require_parameters`；要按连接指定提供商，需要一个小改动走重载窗口，或者用户在 OpenRouter 账户的提供商偏好里设。
+- **事件（13:4x）**：DeepSeek 连接 7f4c083d 返回 402 payment_required，20 个角色和事实库都停了。充值只能由用户操作。我这轮测试也用掉了一些余额（约 200 次调用）。
+- **D78（13:40，用户原话）**：「现在Grok负责的部分交给openai，我已经把api配好了，切换好之后把grok删了。」
+  - 线上没有任何角色、事实库或投票跟踪用 Grok；它只在只读分析脚本里当参照模型。这个参照角色现在交给 openai 连接（29ec3efc，`gpt-6.1-sol`）。
+  - 测试：普通对话和结构化 JSON 输出都正常，3–7 秒返回。重跑 Grok 做过的回复检查对比：40 条 DeepSeek 已通过的回复里，OpenAI 判 7 条不通过（Grok 当时判 8 条，Jev 判 7 条）；方向一致率 97–100%，"有没有查不到的说法"一致率 82–85%，27 秒跑完。帖子立场参照：20 条里和 Jev 一致 50%（Grok 当时 52%）。
+  - 13:45 通过面板的删除接口删掉 spacex（Grok，d469973b）。剩下的连接：deepseek（默认）、Jev、openai。
+- **D77（13:05，用户原话）**：「用 Jev 标注帖子的立场和顾虑……那也可以做」。
+  - 验证（只读）：抽 300 条已知 NPC 最近 24 小时的帖子，Jev 和关键词的立场一致率只有 37%。关键词判"没决定"的帖子，Jev 有 40 条判 Yes；关键词判"无关"的帖子，Jev 有 44 条判 No。提到至少一类顾虑的帖子，Jev 判出 246 条，关键词判出 156 条。
+  - 再抽 40 条给 Grok 当裁判：Grok 和 Jev 一致 52%，和关键词一致 42%。Jev 更接近 Grok，但单条帖子的立场本身就模糊，三方都不算一致。
+  - 用户 13:20 决定：「这一项先别急」，暂缓，不开发。
+  - 原计划（暂缓）：新帖用 Jev 标注立场和顾虑，并记录概率，和关键词结果一起存。选回复对象时，只在 Jev 很有把握时（概率 ≥ 0.7）才用它的立场，否则仍用关键词；顾虑雷达改用 Jev 的顾虑判断。
+- **D76（12:45，用户原话）**：针对「Use Jev-first checking after all, with DeepSeek only for rewrites?」回答「可以的」。
+  - 做法（第二十三窗口）：每条回复先交给 Jev 判三项——方向、是否让步、有没有查不到的说法。三项都通过就直接进入发送；有任何一项不通过，或者 Jev 不可用，就交给原来的 DeepSeek 检查，由它给出修改意见并重写。
+- **D75（12:40，用户原话）**：「这些都做一下吧」（三项：用 Jev 检查回复、用 Jev 标注帖子立场和顾虑、选回复对象时用投票意向标签）。
+  - 已完成：选回复对象时，Jev 最新一小时判为"没决定"或"倾向 No"（No 概率 < 0.75）的已知 NPC 加 3 分；"坚定 No"（No 概率 ≥ 0.75）减 4 分。投票面板新增说服效果对比：Poll 1 之后被我们回复过的人和其他人，各自的立场变化。
+  - 用 Jev 检查回复（只读验证，150 条 DeepSeek 已判通过的回复）：方向一致 93%，让步一致 99%（改了问法之后），"查不到的说法"一致 68%，Jev 会否掉其中 35%。用户决定（13:00）：「那这个就先不替换」，所以继续用 DeepSeek 检查，也不做影子模式。随后按用户要求加了 Grok 做三方对比（40 条 DeepSeek 已判通过的回复）：三者在方向上一致 97–100%，在让步上一致 100%；在"查不到的说法"上，Grok 和 DeepSeek 一致 80%，和 Jev 一致 77%。Grok 会否掉其中 8 条，Jev 会否掉 7 条，说明 DeepSeek 在这一项上偏宽松。
+  - 用 Jev 标注帖子立场和顾虑：还没开始。
+- **D74（12:20，用户原话）**：「Yes: label active known NPCs with Jev every hour, keep the shares and the Poll 1 calibration in a read-only panel with the Poll 2 forecast and same-person changes, and ship it in the next window.」以及「Grok 一般不用，先用jev吧」。
+  - 做法：新模块 `vote_tracker` 每小时把最近 24 小时发过帖的已知 NPC（id ≤ 2343）逐个交给 Jev 判断投票意向，带概率，结果存入新表 `npc_vote_labels`。Poll 1 之前那段时间只判一次，用来按官方 Poll 1（33.8 / 36.2 / 29.5）给每一类一个校准系数。
+  - 输出：校准后的 Poll 2 预测、90% 区间、三种结果的概率、同一批人的立场变化、每小时历史。接口是只读的 `GET /api/polls/forecast`，面板放在积分页。
+  - 依据：DeepSeek 和 Jev 全量判断都指向 Yes 略微领先（50.8 和 52.6）；三个模型逐人一致率 79–86%，但几百人的小样本会把方向弄反，所以每次都判全部人群。
+- **D73（10:20，用户原话）**：「我已经又给你连接了5个账号，现在你有20个可用账号」。
+  - 新角色 Callum 11252、Fiona 11255、Rob 11256、Aisha 11259、Kerry 11260 组成 D 组，排班 05:00–10:00 和 14:00–21:00（悉尼时间），每小时上限 8 条，非高峰 6 条，21:00–05:00 休息。
+  - 依据（20–23 日已知 NPC 每小时发帖和回复数，除以在班组数）：14–16 点只有 B 组在班，NPC 每小时 224–254 条；06–08 点只有 A 组在班，07 点 199 条。12 点和 21 点三组同时在班，NPC 只有 153 和 190 条。
+  - 第二十窗口上线后再启用这 5 个角色。
+- **D72（10:00，用户原话）**：「可以缩短，我们最好落在2-10分钟这一档」「一部分也可以落2分钟以内，你规划一下吧」「你让这个时间合理取舍。不会太快被识别举报，也不要太慢而关注度降低」。
+  - 做法：去掉回复的人为等待（`REPLY_DELAY_SECONDS` 由 3–10 分钟改为 0）。发送时间只按 NPC 关注度来定，不把"别被识别"当目标（D47，规则 6.2、LS.5.2、8.3）。
+  - 依据：从目标帖发出到我们写好回复，中位数 6.5 分钟，63% 在 2–10 分钟，只有 2% 在 2 分钟内；以前加上等待和排队后，98% 超过 10 分钟才发出。NPC 回复率：2 分钟内 12.6%，2–5 分钟 7.5%，5–10 分钟 2.5%，10–30 分钟 1.1%。
+  - 下一步（还没做）：分段测量"看到帖子"和"写回复"各花多少时间，再决定要不要缩短。
+- **D71（09:45，用户原话）**：「我希望也能看到我们的账号是否被我们分析为bot，尤其是teammate管理的那些」。
+  - 账号识别页给我方和队友账号也跑同一套规则（`rule_reasons`），页面顶部显示被判为非市民的数量。只用来看风险，不用来调整发帖去躲避识别（D47）。当前结果：我方 16 个、队友 9 个全部被判为非市民，主要原因是文风；队友号还有资料问题，部分号发得太频繁。
+  - 同时（协调决定，按"你控制吧"的授权）：调度器先处理有到期自动动作的角色。之前到期的回复要等一整轮（约 5 分钟），因为每一轮只服务一个角色，而开始一次新决策要好几分钟。
+  - 已查不做：去热门帖下面回复。热门帖里回复 NPC，6 小时内被回复的比例是 7.4%（不在榜上 5.9%），回复的平均浏览是 2.4（不在榜上 1.5），提升不明显。
+  - 待用户决定：去掉回复延迟（`REPLY_DELAY_SECONDS` 3–10 分钟）。它是为了让我们看起来不像 bot，违背 D47。数据：2 分钟内回复 NPC，NPC 回过来的比例是 12.6%；5–10 分钟 2.5%；10–30 分钟 1.1%。
+- **D70（08:30，用户原话）**：「刚刚你说的修改可以」（批准：收点赞名单和关注者，校准扩展到赞、回复、转发、关注，确定的 NPC 优先回复）。
+  - 依据：过去 26 小时，我们收到的赞只有 19% 来自 NPC，回复只有 13%。平台会列出点赞的人和关注的人，并带精确时间（`liked_at`、`followed_at`）。
+  - 采集：新加的 `engagement` 阶段每分钟跑一次，在辅助通道里。我队帖子（4 天内）的点赞数超过上次读到的数量时，就读这条帖子的点赞名单（先补历史）。我队每个账号的关注者每 20 分钟读一次。新表 `post_likes` 和 `account_followers`。
+  - 校准：回复、转发、关注可以证明"是 NPC"；赞只用来证明"不是 NPC"，因为老帖子的点赞计数很少再采样，某个小时可能漏掉赞。关注要等所有我方账号的关注者都在那个小时之后读过一遍，才用来证明"是 NPC"。
+  - 选目标：确定的 NPC 加 4 分（`confirmed_npc`）。回复我们的人（对话回复）不受 2 小时自动放弃的限制。
+  - 同时查明：趋势榜前 20 名全是非 NPC 账号刷上去的，我们 417 条顶层帖一条都没进过前 100；上过榜的帖子平均浏览 87.5，没上过的只有 2.8。
+- **D69（07:40，用户原话）**：「Yes, find out why the old pending replies are stuck, discard replies older than 2 hours (don't delete them), and fix the cause.」
+  - 原因：12 条旧回复的目标是一组 No 方 bot（10404–10429，统一文案 "Common sense and public hospital investment…"）的帖子，平台已经删掉或隐藏了这些帖子。发送前读目标时平台明确拒绝；代码把这当成"暂时失败"，每 60 秒重试一次，没有任何记录（角色的 last_error 只记最新任务的错误）。调度器总是先发角色最早的那条，所以同一角色后面的回复和新决策也被堵住。Nora、Simon、Hemi 从 22 日 12–14 点（UTC）起到换班一直卡着，分别失败 499、497、539 次。
+  - 已处理：12 条超过 2 小时的回复用 discard 接口放弃（状态 discarded，记录保留）。之后 Leah 被堵住的 19:55 回复已经发出。
+  - 修复：① 平台对目标返回 400/403/404/410/422 时，自动动作改为 skipped（`target_unavailable`），记事件，不再重试；人工动作直接报错。② 其他失败按 60、120、240 秒……最多 30 分钟拉长重试间隔，错误写在草稿上。③ 自动回复写好 2 小时还没发出就自动放弃（discarded，`expired`，记事件）；人工的和等审核的不动。
+- **D68（01:10，用户原话）**：「Yes, make the score and exposure pages combine the live activity table with the CSV (newest rows from the table until the CSV catches up), and ship it in window 17.」
+  - 做法：新模块 `official_feed.pending_rows` 返回比 CSV 最新一条还新的实时活动表行，解析方式和导入完全一样，并标记 `preview`。CSV 赶上之后，这些行就不再计入，不会重复计算。
+  - 改动的读取方：
+    - 积分页总额和对账（`scoring.score_overview`）；
+    - 积分流水，第一页最上面显示「实时（尚未导出）」；
+    - 曝光页每小时数据，并显示「实时活动表到 …」；
+    - 首页漏斗的浏览数和转向数。
+  - 01:10 扩展 1.3.5 第一次在新服务器上同步，存入 20 行，最新一条是 00:19 的报告（+72）。
+- **D67（00:45，用户原话）**：「如果不用，就把这个模块删了」，然后选择「Do the light removal now … Ship it in window 16 with the extension fix」。
+  - 产品里不再有模型选读：
+    - Prompt 页去掉了选读 prompt；
+    - 资料筛选页去掉了「筛选 API 设置」，`POST /api/agents/reading-selection` 删除；
+    - 设置总览去掉了选读连接和连接状态；
+    - `/api/agents/save` 只接受 `reading_selection_mode='rules'`，每次保存都写成 rules；
+    - 规则选读不再检查选读连接。
+  - 旧的模型选读代码留在仓库里，产品里走不到；约 30 个测试文件还在用它，完整删除以后再做。
+  - 同一窗口还有一项：扩展 1.3.5 改读每一行的 `data-utc`。原来按表头 "When (Australia/Sydney)" 找表，但这个表头是页面脚本后来加的，下载到的原始页面里只有 "When"，所以 1.3.4 读到 0 行。服务器两种格式都接受。
+- **D66（00:25，用户原话）**：「今天我会给你的账号数量增加到20」「我已经设置成21，因为包含一个不可用的账号」。
+  - 协调新建了 4 个角色：Callum Price、Fiona McLeod、Rob Fletcher、Aisha Rahman。
+    - 选题依据：近 24 小时赛前 NPC 中未决定和偏 No 的帖子提到最多的顾虑：医院 324、工作与生意 272、场所清单 242、身份证与隐私 239。
+    - 人设见 `docs/drafts/personas-new-8.md` 的第二个补充一节。
+    - 设置：停用、未绑定、规则选读、只发帖和回复；AI 连接两个用 ba70，两个用 7f4c。
+  - 用户补充：「应该创建5个roles，可用agent才到20」。协调又新建了 Kerry Donovan（主要回应 freedom 119 和工作，AI 连接 ba70）。
+  - 现在共 21 个角色，达到上限 21；除 Maya 外可用 20 个。两个 AI 连接各 10 个。
+  - 下一步：用户连接账号后，协调排班分组（改代码，跟重载一起上线），上线后再启用。
+- **D65（00:20，用户原话）**：「你再创建一个角色，我连接用户替代5554」，以及「我已经提升角色限制额度」（上限改成 16，用户操作）。
+  - 协调新建了角色 Bev Thornton（`bev_thornton_kc`，id `4311ff95…`），人设见 `docs/drafts/personas-new-8.md` 的补充一节。她回应的顾虑和 Maya 一样：老人和照护者、身份证与隐私、纸质证书。
+  - 设置：停用、未绑定；规则选读；只发帖和回复；auto 模式；AI 连接 ba70（openrouter1）。现在共 16 个角色。
+  - 下一步：
+    - 用户连接账号后，协调把新账号 id 写进排班 A 组，替换 5554。这要改代码，跟下一个窗口一起上线。
+    - 上线之前保持停用：不在任何组的账号不受排班限制，会全天发帖。
+- **D64（00:05，用户截图）**：23:49 官方消息说 Maya（@maya_collins，5554）有 3 条帖子被判 inauthentic 并隐藏，账号被封，不能再登录和发帖。官方同时显示 "26 registered; 1 banned"。
+  - 协调按「你控制吧」的授权，把 Maya 这个角色停用（version 25）。她在 A 组，22:00 以后不在班，所以还没有失败的轮次；停用是为了 06:00 不再空跑。
+  - 我们的数据看不出是哪 3 条被隐藏：计数采样仍然把她的帖子看成公开的，官方只报封号，不报是谁举报的。
+  - 量最大的 4 个号风险最高：Ethan 188、Nora 184、Leah 156、Maya 111 条（近 24 小时），其余 11 个号都不到 35 条。
+  - 待办：
+    - 请用户让 yhn 的自动举报排除全部本队账号。举报自己队的帖子不得分，但照样会触发审核，被判 inauthentic 也会隐藏，算进封号次数。
+    - 扩展升级到 1.3.4 后，活动表会实时进来，下一次隐藏或封号能第一时间看到。
+- **D63（23:40，用户原话）**：「事实库有一个待审，你处理一下」。协调拒绝了 `n:9a2779c2ad6a0980`（Kingstonia Herald 10-22："Marina Castillo and the KITB are warning that the measure would create a two-tier society and economic ruin."）。
+  - 拒绝原因：
+    - 它复述的是 No 方论点。写作引用这类事实后会被检查判为让步，和之前停用的 40 条偏 No 事实同样处理。
+    - 它的 `topic_key` 是 `campaign:endorsements`，通过后会取代"Hawthorne 确认投 Yes"的两条生效事实。
+    - 有用的部分已经有了：No 方由 KITB 和 Castillo 领导，见生效事实 `n:1c98cb7a1814de7c`；这个论点由 two_tier 和 work_business 的反驳覆盖。
+  - 处理后：待审 0 条，生效 146 条，Hawthorne 投 Yes 的两条仍然生效。
+- **D62（23:20，用户原话）**：「这9个账号是我们团队的其他人员管理的账号，我无法操控。但是可以监控」。
+  - 协调通过 `POST /api/team-accounts` 把 3278、6379、6383、6386、6387、6388、6391、6397、6401 记为本队账号（Agent Zero，`is_own=1`），证据里写明「队友管理，只能监控，不能操控」。`team_accounts` 现在共 24 个。
+  - 影响：
+    - Agent 不会以它们为目标，Blue 候选也会排除它们；
+    - 账号识别页把它们显示为「我方」；
+    - 归因和 KPI 里，别人回复它们的部分算我队成绩，和官方计分一致。
+    - 不会去登录或操作这些账号，系统里也没有它们的凭据。
+  - 3925 `echovector_02` 和 7083 `James Harden` 用户没有确认，没有加入。
+- **D61（22:37，协调按「你控制吧」的授权决定）**：Simon（6503，B 组）的 AI 连接 id `52641556…` 已经不在保存的连接里，自动轮次一直报「请先保存并选择一个 AI 连接」，6 小时里失败 7 次（页面子 agent 发现，协调只读核实过）。
+  - 处理：经 `/api/agents/save` 只改了 `provider_id`，改成默认连接 `7f4c083d…`（openroute）。保存后 version 为 8。
+  - 现在夜班 B 组里，Ethan 和 Simon 用 7f4c，Nora、Tomás、Hemi 用 ba70。
+- **D60（22:30，用户原话）**：「Yes, build the profile + style non-citizen reasons (P1) with tests and ship them in window 14」。依据是 `reports/generated/npc-identification-research.md`。
+  - `agent_targeting.non_citizen_reasons` 新增两条理由：
+    - `profile`：资料不像平台 NPC 生成器；
+    - `style`：最近 20 条原创文本的文风分低于 −5。
+  - 用户名为空或只见过 id（`created_at` 为空）的账号不判"缺显示名"。
+  - 只读试跑（22:33，近 24 小时活跃的 4,006 个非本队作者）：
+    - 市民从 2,706 降到 2,385，少了 321 个：只因文风 171 个，资料加文风 90 个，只因资料 60 个；
+    - 赛前 NPC 787 个里只多排除 4 个；
+    - 24 小时内回复我们的市民从 51 降到 32；
+    - 未登记的 11 个本队号全部不再算市民；
+    - 计算耗时 3.9 秒。
+  - 测试：`test_agent_targeting` 新增一条，相关 15 个模块共 185 个测试通过。第十四窗口和页面、性能改动一起上线。
+  - P0（把 11 个号补进 `team_accounts`）还在等用户和队友确认。
+  - 23:05 用户确认 9 个账号是 bot：Michael002、Tom Nguyen、Dr Jeff Vance、Dr Donald Dixon、George.Grant、Joseph_Le、Kevin Yoon、John Walker、Sarah.Liu9。
+    - 新规则 9 个全部排除，旧规则只排除了 4 个。
+    - 新找到"单议题账号"信号，没有上线，只作候选。详见研究报告 §8。
+- **22:19 官方小时**：+156（16 浏览、2 赞、4 回复、1 次转向 neither，另含 2 条 first inauthentic reports），另有 +52（4 条 first inauthentic reports，×0.5）。22:27 积分 5,686。
+  - 团队举报目前判对 9 条（19:19 有 3 条，22:19 有 6 条），判错 1 条（22:00）。判错的代价是暂停举报 6 小时，没有扣分。
+- **举报被判真人（22:00 官方消息，用户截图）**："your team reported a post as inauthentic, but it is a legitimate post"，全队暂停举报 6 小时，到约 04:00。
+  - 我方系统只提交过 1 条：21:21:36 用户在 Blue 页点按钮，用 Simon 的账号举报了帖子 183034（@david_highschool_sci，簇 c6411，估计 p=0.994）。
+  - 19:19 有一条官方消息 "+15 points: Moderation: 3 inauthentic reports"，那 3 条不是我方系统报的，说明队友也在手动举报。所以 22:00 这条判定不一定对应 183034，不过时间上吻合（39 分钟后）。
+  - 结论：c6411 这类「多个账号同文、秒回」的簇，可能是官方 NPC 或者被判定为真人。p 值没有校准。在 NPC 研究出结果之前，停止举报 c6411，也不要用按钮报其他簇。
+- **D59（20:20，用户原话）**：「我把账号数上限改成 15，你先设置角色，我会连接好账号」。
+  - 20:24–20:35 新建 5 个角色：Ruth Hansen、Sam Leung、Lena Fischer、Marcus Reid、Ella Morgan。人设在 `docs/drafts/personas-new-8.md`，Marcus 和 Ella 是新写的，补上 not_here_yet、overreaction、lockdown_memory、年轻人这几类顾虑。
+  - 设置：全部停用、未绑定、规则选读、只发帖和回复、auto 模式，模型在两个供应商之间交替。现在共 15 个角色。
+  - 下一步：用户绑定账号后，协调把这 5 个号的 account_id 写进排班 C 组（改代码，下一个窗口上线），上线后再启用。没进排班之前不启用。
+  - 教训：工作台的 Agent 页面会不停轮询很慢的 `/api/agents`，把浏览器到服务的连接占满，导致其他请求卡住。批量操作要在不轮询的页面（比如 `/api/health`）里做。另外 Agent 存储的写入都排在一把全局锁 `begin_write('agent_control')` 后面，每次都整份读写 500 多条草稿，日志里约每分钟出现 1 次 55P03 重试。号越多越明显，是下一个要优化的点。
+- **D58（20:05，用户原话）**：「这个可以你给我弄一个手动一键提交按钮，用一个账号，这种可以把，我自己确认」。第十一窗口。
+  - Blue 页「今日建议」的每张卡片加一个「用 Simon 的账号举报」按钮。点了先弹确认框，框里显示帖子、作者、可信度、簇、原因 `inauthentic` 和要提交的完整说明；只有点「确认提交」才发出。
+  - 接口 `POST /api/blue/report {post_id, confirmed:true}`：没有 `confirmed:true` 一律 400。只接受今天计划里的帖子，每条只报一次，用 Simon 6503 的账号，经过控制器的登录、租约和新的 `report` 限额。
+  - 每次尝试（成功或失败）都记在 meta `blue_reports_submitted`，并计入当天的簇上限；`GET /api/blue/reports` 返回今天的记录，页面上列出来。
+  - **协调会话只写按钮，从不替用户点。** 代码来自之前 stash 里的版本，加上了确认要求。
+- **凭据备份（20:11，用户：「你可以把用户账号密码导出成一个文件嘛，我需要备份」）**：
+  - 协调会话不导出明文密码：明文处理密码不行，即使是用户自己的账号。
+  - 改为把 10 个号和 team.key 的加密凭据文件复制到 `data/secrets/agent-credential-backups/20261022T201142/`。这个目录被 git 忽略。
+  - 这些文件用 Windows DPAPI 加密，只能在这台电脑的这个 Windows 账户下解开。
+- **D57（20:00，协调按 D52 的授权决定）**：发帖配比改回「市民回我们一定回复；其余两条原创一条回复」，第十窗口上线。
+  - 原因：回复优先上线后，原创从每小时 16–23 条（昨天）掉到 1–6 条。官方 NPC 浏览从每小时 14–22 次掉到 3–13 次，得分从 174–247 掉到 15–49 分/小时；回复每小时只带来约 2 条官方 NPC 回复。
+  - 晚上本来就是低谷，但昨天 18:53 还有 22 次浏览，今天 18:16 只有 3 次。
+  - **干扰因素（用户转来的官方 Discord 公告）**：18:05 说 redis 故障导致点赞、转发和计数器冻结了几个小时，18:36 恢复，活动都保留。所以 16:00–18:36 的下滑有一部分是平台故障，分数可能之后补算。需要看 20:47、21:47 的官方报告来区分。
+  - 同一份公告还说：每队待处理举报上限从 25 提到 30；同一帖子或账号被多支队伍举报时，自动审核更准。
+  - 新规则 `agent_decision.next_mix(sources, drafts, agent_id, now)`：
+    - 有市民在回我们（未拦截的通知）就回复；
+    - 否则，最近 2 条里有回复就发原创；
+    - 连续 2 条原创之后，有精准目标（回复机会队列或 10 分钟内的新帖）就回复，没有就继续发原创；
+    - 历史不足 2 条时交给模型选。
+- **D56（19:40，用户原话）**：「那个举报我授权你直接操作，试一下行不行」。
+  - 当前候选：p≥0.9 的 38 个全是 Yes 方（主要是簇 c6411，30 个号，29 个号发了同一段文字）。No 方最高 p=0.75（20 个号发同一段文字，只有一类证据），不够格。
+  - 选了今天计划第一名做试验：帖子 183034，@david_highschool_sci（账号 10107），p=0.994。平台上这个讨论串是他和 @MickOutOfUniform 来回刷固定台词，证据很清楚。
+  - 卡住：内置浏览器没有登录平台（页面显示 "Reads are public. Sign in to post."）。协调会话不能代输密码，需要用户在浏览器面板里自己登录平台，之后协调会话只试 1 条。没有提交任何举报。
+  - 用户说：「等一下，我不知道账户密码啊，那个是我的ctn直接管理的」。平台账号都是 CTN 托管的 Agent 账号，没有人工登录。
+  - 官方 SDK 有 `Account.report_post(post_id, reason, detail)`，reason 取 `inauthentic`。协调会话开始在 CTN 里做受控的提交接口：只报今天计划里、阈值以上的帖子，每条一次，用 Simon 6503 的账号，记日志并计入当日上限。
+  - **这是自动举报提交第三次被系统安全检查（Real-World Transactions）拦截，即使用户明确授权也一样。** 协调会话按要求停止，不换路线绕过。
+  - 写到一半的代码放在 `git stash`（"parked (blocked by safety check): Blue report submission endpoint, D56"），没有部署，工作区恢复成线上的第九窗口。
+  - 没有提交任何举报。要恢复这条路，只能由用户自己在 Claude Code 设置里放行，或者用户自己登录平台手动举报。
+- **第九窗口重载**：后端 1895 个、前端 446 个测试和 tsc 都通过，dist 备份在 `backups/dist-before-unified-20261022-192757`。
+  - 19:28 第一次重载在 `drain_existing_work` 超时（300 秒），结果 `aborted_existing_backend_kept`：旧的第八窗口继续服务，健康正常，什么都没部署。
+  - 原因：10 个号同时跑，5 分钟内总有一个任务在运行。
+  - 19:34 用 `-WaitTimeoutSeconds 900` 重试。以后号多的时候，重载都用 900 秒。
+- **第九窗口（19:05 开始）：账号识别页（D55）**
+  - 用户原话：「Yes, build the account identification page (citizen NPC / bot / heavy / ours / public figures) at /processing/bots with a read-only API, and ship it in the next window.」
+  - 后端：新文件 `ctn_data/account_identity.py`，接口 `GET /api/accounts/identity?label=&q=&limit=`，只读，缓存 5 分钟后台刷新。
+    - 每个 24 小时活跃账号给一个标签：我方 > 公众人物（认证） > 机器人（account_annotations） > 高频/非市民（新的 `agent_targeting.non_citizen_reasons`） > 市民。
+    - 每个账号带依据、24 小时发帖和回复、累计和 48 小时动作数、立场（来自 post_annotations）、最近一条、我方回复次数、对方回我们的次数。
+    - `non_citizens` 改成调用 `non_citizen_reasons`，行为不变。
+  - 前端：`/processing/bots` 从占位页换成 `AccountIdentity.tsx`，侧边栏名称从「机器人识别」改成「账号识别」。
+  - 线上只读试跑：5.6 秒（原来逐条分类要 52 秒，改用标注表）。3,711 个活跃账号：市民 2,444、机器人 617、高频/非市民 633、我方 9、公众人物和媒体 8；33 个市民回过我们。市民集合和 `citizen_accounts` 完全一致。
+- **第八窗口已上线（18:34–18:35，unified-20261022h，git `3412bbe`）**：
+  - 后端 1890 个测试通过。修复了 Maya 那种卡死：等待中的生成任务不再被资料修改前的旧草稿占住（`agent_lifecycle.waiting_for_publication`）。Daniel 10276 加入 A 组，Simon 6503 加入 B 组。
+  - 重载时先 `git stash` 了第九窗口未完成的改动，确保只部署第八窗口；重载完再恢复。
+  - 19:07–19:09（用户把浏览器面板打开之后）：启用 Simon 和 Daniel，Priya、Hemi、Daniel 改成规则选读。**现在 10 个号全部启用，全部用规则选读。**
+    - Daniel 19:08 开始第一轮（A 组在班）。Simon 在 B 组，21:00 上班。
+    - 原来那个标签页卡死了，关掉以后新标签页恢复正常。保存每次 25–35 秒，要一次一个。
+- **D54（用户原话）**：「我已经调整额度，你可以看一下，现在你可以控制所有agent了，如果不够我可以给你更多」。
+  - 核对结果：Daniel 有了平台账号；发帖/回复限额由 3 次/分钟提到约 7.8 次/分钟，18:18 更新；协调会话自己的额度没变。
+  - 决定：启用 Daniel 和 Simon。Simon 作为普通自动 Agent，手动发帖仍按 D36 关闭。所有号改用规则选读。每个号每小时的上限不改。
+- **第七窗口上线 133 分钟的结果（17:06，`compare_reading_trial.py --since 03:53:50Z`）**：
+  - 发布 60 条：53 条回复、7 条原创，原创都带公众人物 @。
+  - **市民回复 10 次，全落在回复上**，回复的市民回应率 19%；之前其他账号的基准是 6–7%，我们 6 小时是 2%。
+  - **7 条公众人物原创帖 0 条市民回复**，按别人的 0.51/帖算应该有 3–4 条，P≈3%。对我们这种阅读量很低的号，这个效果没有复现。结论：保持回复优先，原创只在没有精准目标时才发。
+  - 规则选读的 Nora：12 条回复，阅读调用 0 次，3 条市民回复。用模型选读的号每个用了 7–17 次阅读调用，产出接近。
+- **Maya 卡死修复（17:07）**：
+  - 现象：Maya 从 11:26 起没有再运行。11:26 的一条原创草稿在等发布额度，11:27 她的角色资料被保存，persona_revision 从 12 变成 13。之后 `draft_matches_persona` 一直跳过这条草稿，而她的生成任务一直等这条草稿发布，形成死锁。
+  - 处理：协调用 `/api/agents/discard` 把这条草稿标成 discarded（没有删除）。其他号没有同样的旧草稿。
+  - 待修：资料保存后，旧的待发草稿应该自动放弃，或者等待中的任务应该释放。下一个窗口改。
+- **✅ 第七窗口已上线（14:52–14:53，unified-20261022g，git `dcedd5c`）**：
+  - 测试：后端 1889 个（24 个跳过），前端 443 个，tsc 通过。dist 备份在 `backups/dist-before-unified-20261022-145242`。
+  - 结果：result=ready，health ok（postgresql，live）。
+  - 14:55 启用 Grace、Tomás、Priya、Hemi，现在 8 个号都在跑。B 组（Ethan、Nora、Tomás、Hemi）班次到 17:00，A 组 16:00 上班。只有 Nora 用规则选读。
+  - 待确认：新规则下回复和原创的比例、原创帖是否带公众人物 @、逐字复制失败是否下降、新号第一次发布是否正常。
+- **第七窗口（14:45 开始）**：F1、F3、D52 和排班新号。
+  - **D53（用户原话）**：「Yes, build F1 (one concern-matched public-figure mention per original) and F3 (looser word-for-word fact check with a retry on a different fact), test them and ship in window 7.」
+  - **D52（用户原话）**：「取消之前的说的3个帖子中2个发帖1个回复的设计，我记得有。你就找到npc精准互动，你控制吧。想发帖回复啥的，你自己控制」
+    - 新规则 `agent_decision.next_mix`：这轮资料里有精准的市民目标就只回复，否则发原创。精准目标指：市民回复我们、回复机会队列里的帖子、10 分钟内的新帖，而且没被拦截。资料没有发帖时间时交给模型选。
+    - 这条规则只在角色只允许发帖和回复时生效；允许点赞或转发的角色照旧自由选。排班和每小时上限不变。
+    - 全链路页去掉了「目标 2:1」的判定，比例只显示，不再算异常。
+  - **F1**：原创帖按话题提 1 位公众人物，同一个号不连续提同一个人；替换原来的 1–2 个市民 @。
+    - @DrAmaraSingh：医院、安全、儿童等话题。@MarinaCastilloCEO：工作、旅游、自由等话题。@RealVictorHawthorne：权力、身份证、先例等话题。
+    - 写作提示要求只 @ 一次、不替他们说话；格式检查缺了会让模型重写一次。原创帖最多 1 个 @。
+  - **F3**：逐字复制检查把人名、机构名和数字各算 1 个字符，上限 50。如果第二次只剩这一个问题，就换一个事实写第三次，不整轮作废。
+    - 没用 60：一句短事实整句照抄，掩码后是 56 个字符，60 会漏掉。
+  - **新号排班**（用户原话：「那个agent账号我已经创建完了，你可以随意开启使用，受你控制」）：
+    - A 组加 Grace 10242、Priya 10264；B 组加 Tomás 10243、Hemi 10275。
+    - 上线后再启用这 4 个号，因为不在组里的号不受班次限制。
+    - Daniel 注册被平台拒绝，没有账号；Simon 按 D36 不启用。
+  - 对比脚本加了公众人物原创帖数和这些帖收到的市民回复两列。
+- **第五窗口后 KPI 复测（14:15，`reports/generated/kpi-after-w5-20261022-0315.json`，01:15–03:15Z 共 2 小时，只做这一次）**：
+  - 原创帖占比 0.629（39 帖、23 回复），接近 2:1。每小时浏览 5.5（基线约 4）。向我方转变 0。
+  - 积分 4663，最近 12 小时 24.3 分/小时（基线 57.8，包括夜里）。离 7000 还差 2337，按这个速度要 96 小时。Poll 2 约 25 日 07:11 计分，大约 65 小时后，需要约 36 分/小时。**照现在的速度会差 700–800 分**。
+  - **生成失败率 48%**（22/46），基线 30.7%。第五窗口内 45%，第六窗口上线后 36%（样本小）。失败原因的大头是 12 次「You copied a fact word for word」：A 在第五窗口加的回复检查 `VERBATIM_LIMIT=40`，连续 40 个相同字符就打回，第二次还不过就整轮作废，所以回复被饿死了。其余是方向检查 3 次、无依据说法 1 次。
+  - 归因重算已经在结算：724 行里 517 行结算完。今天的回复 481 条，结算 326 条，市民回复 7 条（其中 No 1 条）。原创帖 54 条，只结算 2 条（帖子的结算窗口更长）。
+  - 提议 F3：逐字复制检查只看事实正文，不算人名、机构名和数字，上限提到 60 个字符；第二次只剩这一个问题时，换一个事实再写一次，不要整轮作废。和 F1 一起放第七窗口，等用户批准。
+- **D51（13:55，用户原话）**：「Yes, investigate why only ~27% of reply targets are calibrated citizens and why our posts got 0 citizen replies, read-only first, then propose a fix.」结果在 `reports/generated/citizen-gap-20261022.md`。
+  - 27% 主要是第五窗口之前的回复，基线窗口从 00:41Z 开始，规则 01:13Z 才上线。之后 9 条里 6 条是市民（67%），市民规则有效。
+  - 市民不回我们：一是量，我们 6 小时只回了市民 45 次，bot 回了 2779 次，回答率差别不显著；二是原创帖从不提公众人物。同一批作者，提到 @RealVictorHawthorne、@DrAmaraSingh、@MarinaCastilloCEO 的帖子平均 0.51 条市民回复，不提的只有 0.03 条，差 17 倍。提普通市民几乎没用：我们 17 次得到 0 条，其他队 108 次得到 2 条。
+  - 提议 F1：每条原创按话题提 1 位公众人物，替换现在的 1–2 个市民 @。F2：在对比脚本里加这一列。等用户批准再改代码。
+- **D50（13:42，用户原话）**：「Yes, switch one Agent to reading_selection_mode=rules for the trial and compare it with the others.」
+  - 13:41:52（02:41:52Z）把 Nora Bennett（6494，B 组，班次 12:00–17:00）改成 `reading_selection_mode=rules`，角色版本 11→12。用的是工作台自己的 `/api/agents/save`，只改了这一个字段。Maya、Ethan、Leah 保持 model，作对照组。
+  - 对比脚本：`scripts/compare_reading_trial.py --since 2026-10-22T02:41:52Z`（只读）。每个启用的 Agent 输出试验期和之前同样长时段的数据：reading/decide/write 调用数、token、发帖和回复数、回复目标的帖龄中位数、10 分钟内新帖占比、市民目标占比、可说服目标占比、收到的回复和市民回复。
+  - 13:53 已确认：Nora 第一次规则选读没有调用模型（通知 4 条、回复机会 6 条，队列共 18 条），69 秒后发布。第二轮在写作检查失败（事实原句照抄），和选读方式无关。规则选读本身用了约 14 秒。日志里的「AI 预览 N 条候选」这句话对规则模式不准确，只是文案问题。
+  - 预期：Nora 的 reading 调用归零，回复目标更新、市民占比更高。至少跑 1–2 小时再下结论。要回退的话，把她的 `reading_selection_mode` 改回 model。
+  - 试验前 2 小时（00:41–02:44Z）的基线：4 个号回复目标里的市民只占 25–31%；4 个号的帖子和回复一共收到 24 条回应，**市民回复 0 条**。这说明「只回复市民」的规则在发布端还没真正生效，或者被回复的账号事后才被判成非市民，需要查。
+- **✅ 第六窗口已上线（13:37–13:39，unified-20261022f，git `71d5c5e`）**：
+  - 测试：后端 1883 个（24 个跳过），前端 443 个，tsc 通过，全部一次跑通。
+  - 前端：构建前的 dist 备份在 `backups/dist-before-unified-20261022-133729`。
+  - 结果：result=ready，health ok（postgresql，live）；`/`、`/analysis/clusters`、`/blue` 都返回页面。
+  - 待办：确认重载后 Agent 恢复调用模型；在 1 个号上试 `reading_selection_mode=rules`。
+- **第六窗口（13:20 开始）**：内容是 D48 行为子 agent 的全部改动、UI 子 agent 的全链路首页 `/` 和簇页面 `/analysis/clusters`、D49 的 Blue 立场标签。步骤：git commit → 后端分片测试 → 前端分片测试 → 构建 → 后台重载 → 健康检查。上线后在 1 个号上试 `reading_selection_mode=rules`。
+- **D49（13:15，用户原话）**：「report No-side bots first」，以及「Add a Yes/No side label and No-side filter to the Blue candidates page, shipping in window 6」。
+  - 后端：`blue_reports.candidates` 给每个候选加 `side`（yes/no/mixed/unknown），按簇内所有账号 24 小时的帖子用 `agent_targeting.classify` 计数。一方至少 2 条，且不少于另一方的 2 倍，才算这一方。
+  - 今日计划：阈值以上的候选先排 No 方，再排混合/不明，最后排 Yes 方。
+  - 页面：每张卡片显示立场标签，加「只看 No 方」筛选，地址参数是 `?side=no`。
+  - 13:12 只读核对：200 个候选里 p≥0.9 的 36 个全是 Yes 方（簇 c6411、c6831），No 方最高只有 p=0.73，证据只有回复快。建议现在不举报 No 方。举报仍由用户本人在平台提交（自动提交被系统拦截过两次）。
+- **D48（12:35，用户原话）**：「把没完成的，继续。我需要把我的帖子推上热门，我需要发现npc精准大量的回复」。新开一个子 agent（行为线）：
+  - 回复机会队列：用规则选读代替模型选读，设置 reading_selection_mode=rules|model，先拿 1 个号试；
+  - 我方原创帖收到市民回复时，优先回复回去；
+  - 原创帖按高峰时段发、追当前热门话题；
+  - 瘦身：generation_phase 审计降噪、精简 decide 提示词；
+  - offered_facts 传 agent_id。
+
+  不做：我方号之间互刷（违反 LS.5.3，D30）、规避检测（D47）。2:1 和排班保持不变。UI 子 agent 同时在做首页和簇页面（只改前端和 server.py）。
+- **✅ 第五窗口已上线（12:12–12:13，unified-20261022e）**：
+  - 测试：后端 1853 个；前端 408 个，4 个高负载下的超时单独重跑通过。
+  - 结果：result=ready，维护已解除。
+  - D46 归因重算已执行：清空 690 行，等 settle 重新结算，约 20 分钟。
+  - UI 子 agent 已启动：全链路首页、簇页面，第六窗口上线。
+- **第五窗口（11:45 开始，git `79166ac`）**：A–F 全部已交接，没有会话在改文件。步骤：后端分片测试 → 前端分片测试 → 构建 → 重载 → 健康检查 → 执行 D46 的归因重算 → 启动 UI 子 agent（全链路首页、簇页面）。
+- **D47（11:45）行为子 agent 的结果**：
+  - 已完成（未部署）：
+    - 排班的公平份额 bug 修好了：不当班的账号会一直卡住当班账号；
+    - 每小时上限：高峰 8 条、平时 6 条、夜班 4 条；
+    - settings 现在能写入 shift_schedule；
+    - 市民口径改为"总动作少于 25，或者 48 小时内写入不超过 20 条"；
+    - post_attribution 改用同一套市民口径。
+  - 目标测试 80 个全部通过。
+  - **不做**："证明我方账号不会触发机器人检测"的自检测试和"跨账号相似度改写"，被安全检查判定为规避检测。平台规则 6.2 也禁止掩盖或绕开对 AI 行为的归属，所以停做，B 原来的版本保持不变。排班和延迟是用户要求的、按人的节奏发帖，已经做完。
+  - 遗留：
+    - test_agent_review_integration 有 1 个错误，来自 B 之前的改动，已派子 agent 修；
+    - offered_facts 传 agent_id 还没做。
+- **D46（11:40）第五窗口重载后必须马上执行**：`docs/handoff/A-attribution-recount.sql`（重算 66 条归因，已备份；用户已在 A 会话里放行，原话：「允许：按 docs/handoff/A.md 第 3 节改线上事实库、人设措辞并重算归因（先备份）」）。必须在新的 post_attribution 上线之后再跑，否则旧代码会按旧口径重新结算。用户已放行的另外两项已由 A 执行完：停用 40 条事实（现在生效 137 条），人设措辞已更新。
+- **D45（11:30）子 agent 开工**：
+  - 数据线（接手 C）：/api/pipeline/status、/api/clusters，字段说明写在 `docs/handoff/C-api.md`；
+  - 行为 + 内容线（接手 B 和 A，同一个子 agent，先做 B 的再做 A 的，避免两边同时改 `agent_pipeline`）：2:1、只回市民、延迟、排班、长时间活跃特征、@ 市民、UNFOLLOW 清单，然后是 offered_facts 的 agent_id 和跨账号相似度检查；
+  - UI 线（接手 E）：等 E 交接完再开工。
+
+  A–D、F 都已交接，E 正在交接。
+- **D44（11:25，用户原话）**：「你直接把其他对话未完成的工作接管变成sub agent控制」。
+  - 交接：A–F 各自把手上的那一项收尾到测试通过，写好交接文档 `docs/handoff/<X>.md`，把状态改成 handed-off，然后停下。
+  - 接手：协调会话按工作线启动子 agent 继续做。子 agent 只改各自负责的文件，重载窗口仍由协调会话执行。
+  - 原因：会话之间的消息每条用户消息最多发 10 条，经常卡住；子 agent 直接向协调会话汇报，没有这个上限。
+- **D43（11:20）**：
+  - **新角色**：协调会话按用户授权创建了 5 个新角色（Grace、Tomás、Priya、Hemi、Daniel），都是停用状态，只能发帖和回复。另外 3 个（Ruth、Sam、Lena）卡在角色上限 10：协调会话改上限被安全检查拦下，需要用户在"队伍设置"里把角色上限改成 16。平台账号由用户本人注册。人设内容在 `docs/drafts/personas-new-8.md`。
+  - **Blue 链接修复**："在平台打开"返回 404，原因是平台的帖子链接格式是 `/twoot/{id}`，不是 `/posts/{id}`。协调会话改了 `blue_view.POST_URL` 和对应测试，第五窗口上线。
+- **D40（11:00）排班细则**：
+  - 采用 B 的排班：A 组 06–13、16–22；B 组 12–17，夜班 21–06 降频。悉尼 07–22 点至少一整组在线，每个账号至少连续休息 6 小时。
+  - 上限：白班每小时 8 条、夜班每小时 4 条，可以配置。
+  - 2:1 规则：最近两条都是原创就回复，否则发原创。
+  - 排班支持 N 个组，方便以后加账号。
+  - 取舍：只有 4 个号又要按人的节奏发，全队产量会从约每小时 48 条降到约 15 条。根本办法是加账号，这件事等用户决定。
+- **雷达已恢复（10:55）**：手动触发后生成了新报告 71477074，并自动启用。
+- **D37（10:55，用户原话）**：「你可以让账号有重叠活跃性，把账号分组，这一组这6小时活跃，下一组」。由 B 实现排班：
+  - 分组：A 组 Maya + Leah，B 组 Ethan + Nora；
+  - 班次：6 小时一班轮换，相邻两班重叠 1 小时；每个账号每天至少连续休息 6 小时；
+  - 覆盖：悉尼 07–22 点至少 2 个账号在线，深夜 1 组低频；
+  - 排班写在 Agent 设置里，可以调整；不当班的账号只读通知。
+
+  第五窗口上线。
+- **D36（10:53，用户原话）**：「关闭手工发帖」。F 停止所有代发：取消排队、放弃待确认的人工草稿（不删数据），手工发帖相关的开发也暂停。
+- **D35（10:52，用户原话）**：「确保3条中，两条原创一条回复」。由 B 在第五窗口实现：每个 Agent 最近 3 条里原创不到 2 条时只能发帖，已有 2 条原创时只能回复（没有合格回复目标就发帖）。同批按深度分析（`reports/generated/deep-analysis/`）一起做：
+  - 回复只给市民（48 小时内写入不超过 20 条，且不在协同簇里），优先回还没有别队回复过的帖子；
+  - 回复延迟 3–10 分钟；
+  - 每个账号每天 60–80 条、每小时不超过 6 条；悉尼凌晨静默 5–7 小时；同一个市民一天只让我们一个账号回；
+  - 取消关注 11 个机器人账号。
+- **D34（10:40）顾虑雷达故障（用户报告）**：
+  - 现象：20:36 和 22:36 UTC 两轮自动分析都在约 17 秒时失败，提示"自动内容分析未完成"，llm_calls 里没有记录，说明还没调用模型就失败了。21:36 起没有生效中的雷达，Agent 在这段时间里没有雷达指导。
+  - 根因：A 的 `post_attribution.arm_stats` 用 `SUM(npc_replies)` / `SUM(reply_yes)` 统计。PostgreSQL 对 bigint 求和返回 numeric，到 Python 里是 Decimal；雷达证据 `measured_arms` 带着 Decimal，`json.dumps` 报 TypeError。18:36 那轮成功，是因为当时还没有结算好的归因数据。
+  - 修复：协调会话把类型转成 int / float，加了回归测试，并用线上数据验证 prompt 能构建（67,688 字符）。随第四窗口上线，上线后下一轮自动分析会生成新雷达，必要时手动触发一次。
+  - 教训：从 PG 读出的聚合值，写进 JSON 之前一律转成 int / float。
+- **D32（10:50）C 的第四阶段**（`docs/DB_PHASE4_PLAN.md`）：
+  - C 步 autovacuum：批准，由 C 执行；
+  - B 步 pg_trgm + GIN 索引（CONCURRENTLY）：批准，由 C 执行，避开重载窗口；
+  - A 步重启 PG（shared_buffers 4GB、pg_stat_statements、shm_size 1g）：批准，单独开一个窗口，在第四个窗口上线并观察 1 小时之后，由协调会话执行；
+  - D 步保留期限：不做（用户的决定，现在也清不出空间）；
+  - E 步：延后，只读查 worker_result 为什么没清；
+  - F 步：不需要了。
+
+  C 第三阶段的 /api/insights 排进第四个窗口。线上数据：最近 6 小时公民帖子的 Yes ÷ (Yes+No) ≈ 0.50，公投很接近。
+- **D31（10:35）D 第三批修复和锁超时（C 请看这里，我这一轮的会话消息已到上限）**：
+  - **D 的第三批已 green**（未部署）：
+    - 选读截断时 TypeError 的旧 bug 已修（agent_reading:381）；
+    - 选读改用 none（low 对它不起作用，中位数 3907 个思考 token）；
+    - 结构化 JSON 解析失败时自动重发一次。
+  - **交给 B**：Relace 不执行 maxLength，reason 超过 500 字时整轮作废，改成截断。
+  - **交给 C**（只读核查结果）：
+    - 23:00 有一个 `ctn_stream_` 服务器游标，在 READ ONLY 事务里挂了 4.5 分钟。它来自 `postgres.stream`，很可能是标注补标或分析逐批读的时候在 Python 里处理太慢。只读事务不持有行锁，但会让 VACUUM 一直等着。请把批次改短，或者每批单独开一个事务。
+    - 现在没有长事务。本进程的 55P03 次数约 32 次 / 小时，第一窗口前是 74 次 / 小时，下降了。
+- **D30（10:25）暂不开"我方号互相点赞 / 转发"**（回复 A 的第 4 点；我这一轮的会话消息已到上限，A 请看这里）。理由：
+  - **量不够**：进 Trending 的帖子中位数是 40 赞、17 回复、23 转发，每条 2 个我方赞起不了作用；
+  - **风险大**：要有效就得大规模刷，这正是平台规则 LS.5.3 说的协同刷互动。我们的 Maya / Ethan 已经被行为规则判成机器人，一旦被举报、帖子被隐藏，操作数超过 100 的账号会直接被封；
+  - **先看效果**：先上线"原创帖配比 + A 的 Trending 模板"（话题标签、数字、395 字左右、一句个人细节），测 6 小时的浏览和进榜情况，再重新评估。
+  - `block_agent_interactions` 保持开启。
+- **D28（10:05）曝光优先**：A 的相关性报告（`reports/generated/official-correlation-20261022.md`）发现：
+  - 13:53 UTC 起我们一条原创帖都没发，全部是回复，市民浏览只剩每小时 1–8 次；
+  - 浏览和原创帖数相关（r=0.57），和回复数不相关；14 个小时里"向我方转变"是 0 次。
+
+  决定：
+  - B 最优先加发帖 / 回复配比：原创帖低于 40% 时必须发帖；回复只留给价值高的对象。做完单独开窗口上线。
+  - A 先写进 Trending 的原创帖模板，回复模板跟它一起做；measure_kpis 交给 A，加上浏览数、向我方转变次数、发帖 / 回复比例。
+  - C 先做 Trending 特征分析，结果发给 A。
+- **D27（03:40）B 的任务顺序**：B 现在是瓶颈，按下面的顺序做：
+  1. **先修工作区的 4 个测试失败**：`test_agent_loop` 1 个，`test_agent_reading_integration` 3 个，都和 decision_versions 有关。D 核实过，是 B 还没提交的 effective_actions 和 mark_decided 改动造成的。修好之前开不了第三个窗口。
+  2. P0-2 后半。
+  3. tick 排序，把 D26 和 S9 合在一起做：有待回复通知的 Agent 优先排作业；选读必须带上这些通知；决策默认先回复。D 实测：从通知到生成作业排队，中位数 236 秒；47% 的通知被同一 Agent 的其他作业抢先。
+  4. P1-3 目标部分。
+  5. P1-5 防守。
+- D26：发布优先级（人工 0 > 回复通知 1 > 其他回复 2 > 新帖 3）分四处改：
+  - D：`agent_budget` 加"优先占位"；`agent_actions` 发布写入处的 2–3 行包装（授权 D 用 Edit，改前通知 B）；
+  - B：在 P0-2 之后，给 tick 里的 `candidates['publish']` 排序；
+  - F：在 `agent_manual.py` 里实现"人工帖遇到 429 时留在队列里，有名额时只发一次"，等 D 的占位做完再开始。
+- D25：批准 A 的 P1-2 效果归因：新增 `post_attribution` 表；发布 6 小时后统计反应；按"顾虑 × 发帖/回复"做 Thompson 抽样，结果写进 priorities 的排序。上线后 8–12 小时才开始起作用，排进第三个窗口。和官方小时日志的相关性分析只出报告，优先级低。
+- D24：F 第一批 5 条（Simon 6503：153678、153820、154011、154199、154526）都已通过工作台发出，并核对过。人工操作在发布队列里优先级最高，写进 D 的 S4 调度器。F 的改进项第 20–25 条（`docs/MANUAL_POSTING_REVIEW.md` 第 5 节）的分工：
+  - 排队、优先级、"执行时复查我方是否已经回复过"交给 D 和 B；
+  - 按钮、倒计时、恢复草稿这类界面改动交给 E。
+- **排行榜（02:58，只读，竞赛门户）**：共 149 队，65 队有分；我们排第 39 名，4370 分。前五名：placeholder 44128、C-- 43300、Vertex_CTN 42707、Opus4.8Maxxing 42106、Purple Hat 38227。用户要求追第 1 名（原话：「看见榜1了嘛？干他」）。
+  - 判断：前几名约每小时 600 分以上，大头应该来自观点转变（160 分）和 Blue 举报（每次 25 分，全程 ×1）；我们这两项接近 0。
+  - 门户页面只读，用户原话：「这个页面你只能看，不能改」。
+- **D22**：Blue 举报的"自动提交"开发被安全检查拦下（真实世界操作）。
+  - 现在只出候选名单，**由用户本人在平台上提交举报**；
+  - 系统里做一个只读的候选页，列出帖子链接、证据和建议的举报说明（交给 E 做页面）；
+  - 要自动提交，需要用户明确授权。
+- **D21（用户原话）**：「代发贴和回复，需要在我的系统里，我好统计信息」。F 的每条发帖和回复都必须通过 CTN 工作台的手动操作接口，记为 origin=manual；发布后核对系统里查得到。统计页面要能区分人工和自动（页面交给 E，数据接口交给 C）。
+- **C 提醒（02:36）**：最近 6 小时只有 29 分 / 小时，低于 Poll 2 需要的 34.3 分 / 小时；按这个速度，到 Poll 2（推算 25 日 07:11 计票）约 6584 分，差约 416 分。按 12 小时速度（58 分 / 小时）算能达标。下降大概率来自分段流程的检查误判，A 的修复在第二个窗口上线。E 要在驾驶舱加预警：6 小时速度低于所需速度时提示。
+- D20：E 的 Q8–Q14 全部同意（细节见 E 的对话）：
+  - Q11 合并成"待处理"后，要能按"通知 / 操作记录"筛选；
+  - Q12 用独立端口起 vite dev，不输入密码，需要登录时由用户本人登录；
+  - 两个缺陷放进 S1 优先修：AI 连接的删除没有确认，而且会连保存的密钥一起删；站内链接整页刷新会丢筛选状态。
+- **D19（02:35）**：对 D 调度效率测量结果（AI_CALL_EFFICIENCY 第 8 节：每小时有效发布 27.3 条，端到端 139 秒，Agent 空闲 38–68%）的三项决定：
+  - 如果 low 档思考不起作用，选读和检查改用 none，写作暂时不变；
+  - 发帖额度先不放宽：每分钟 1 条只用了 45%；
+  - 通知发现慢（S9，中位数 7.5 分钟）由 D 查，改 `agent_observation` 要等 B 做完那部分。
+
+  分段流程上线后，每小时有效发布从 37–41 条掉到 17–19 条。A 的检查误判修复做好后，单独开一个小重载窗口上线；上线后如果仍低于每小时 30 条，临时切回单次流程。
+- **D18（用户原话）**：「人工发帖与回复流程 单独创一个账号」。F 用一个专门的人工账号发帖，不用 4 个自动 Agent 的账号。
+  - 注册账号、录入凭据都只能由用户本人操作；
+  - 先提议用已停用自动运行的 Simon（6503）作为人工专用账号；
+  - 人工账号不能被自动调度选中。
+- D17：E 的第 9 节答复：
+  - Q1 侧边栏替换顶栏：是；
+  - Q2 AIWorkflow 文件交给 E：等 A 确认；
+  - Q3 /ai/* 的 URL：不改；
+  - Q4 生成流程设置：先列进设置中心；
+  - Q5 /api/nav/status：由 C 做；
+  - Q6 页面归属：Score、Rules、Operations、AISettings、ReadingSelection、AIReview 的 UI 归 E；Agents 页的布局归 E，动作逻辑归 B；
+  - Q7 M6、M7：先从导航隐藏，收进"高级 / 旧功能"，要不要删问用户。
+- **D16（02:26，用户原话）**：「你能不能增加一个对话，你帮我直接回复或者发帖，你看看这个流程，还有哪应该改」。为此新开会话 F「代发帖与回复」（`local_1fffb7ba`）：
+  - 先检查手动发帖流程，写 `docs/MANUAL_POSTING_REVIEW.md`；
+  - 只通过系统已有的手动操作接口发布；
+  - 第一批发布前，由用户本人在 F 的对话里确认；
+  - 解冻后才发布。
+- **D15（02:27，用户原话）**：「易用性那个，增加修改ui吧」。E 的范围扩大到页面 UI，接手 C 的第二阶段。C 改为只负责数据、后端接口、性能和数据库；E 需要新字段时向 C 要
+- **D14（02:25，用户原话）**：「你不用管api额度的问题，我说的是ai工作流调度的问题，高效率」。据此：
+  - 撤销 D12 的兜底（10:00 拉长发布间隔），撤销 D13 的 E8 价格上限和 E9 每日预算；
+  - D 的目标改为调度效率：每小时有效发布数、端到端耗时、Agent 空闲率、并发利用率；
+  - 做法：统一调度器、优先级、流水线化；E4 调低思考和 E5 稳定前缀继续做，现在作为提速手段。
+- D13（02:22）D 的方案（`docs/AI_CALL_EFFICIENCY.md`）第 7 节的决定：
+  - E9 每日预算：软上限 $6、硬上限 $9；
+  - E4 批准：写作、检查、选读、事实提取把 reasoning 调到 low 或 minimal，决策步骤保持 auto；
+  - E8 批准做试验：只给 1 个 Agent 设 max_price，试跑 2 小时；
+  - E1 新建 `llm_calls` 表，`db.py` 由 D 先改、C 后改；
+  - E5 等 A、B 交出 `agent_pipeline` 后由 D 做；E7(b) 由 D 改 `agent_reading.py`，改之前先通知 B。
+- **D12（02:17）OpenRouter 余额告急**：已花 $11.56，约剩 $8.4；按每天约 $12.4 的消耗，约 16 小时后用完。处理办法：
+  - 充值由用户本人操作；
+  - 暂时不降低发布频率，因为 Poll 2 门槛还差约 2630 分；
+  - 解冻后的优先级：D 选读关思考或改成规则选读，并设 max_tokens（D 自己的文件，可以和 A 同时做）；`agent_pipeline` 的顺序**改为 A 先修检查误判，B 的 P0-2 在后**。原因：检查误判每小时浪费约 76 万 token，目标失败每小时约 15 万 token，前者约是后者的 5 倍；
+  - 如果到 10:00 还没充值，协调会话把 Agent 的发布间隔临时拉长。
+- D11（用户要求）：新开会话 E「易用性与功能导航」，负责功能分类和导航。分工：C 的第二阶段管页面内部的重设计，E 管全局导航和入口，两者的方案要对齐
+- D10：Blue 举报候选模块 `ctn_data/blue_reports.py`（18 个测试通过）只出候选名单，**不自动提交举报**。原因：
+  - p 值还没有经过官方裁定校准；
+  - 一次误报会让全队暂停举报 6 小时；
+  - 恶意或轻率举报违反平台规则。
+  试运行结果：有 47 个候选达到 p≥0.85，来自 3 个簇；当天计划报 15 条，预估 227 分。
+  要上页面、加"人工确认后提交"按钮，等 A、B、C 都完成后由协调会话安排。
+  试运行还发现：机器人规则把我们自己的 Maya（5554）和 Ethan（5832）也判成了机器人 → P1-5 防守提高优先级。
+- D9：批准 A 修复雷达审查发现的 1–3 条问题，以及检查步骤误判的 a–d 四个原因。`agent_pipeline.py` 的修改顺序定为：B（P0-2）→ A（检查和写作提示词）→ D（消息顺序 / 缓存）
+- D8（用户要求）：新开会话 D「AI 工作流调用效率」，负责 LLM 调用层。B 的 P0-3、P0-4 和 reasoning 调整改由 D 做；B 保留 P0-2、P1-3 目标部分和 P1-5
+- D7：批准 B 的 P0-2 方案：新增 `effective_actions`，没有目标时去掉 reply 类动作；写作之前先校验目标；被屏蔽资料立即记为已处理
+
+## 变更公告（最新在上）
+- 2026-10-24 23:xx **green — 新增只读诊断接口 `GET /api/diagnostics/memory`，未部署，随第四十五窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 批准，D124）。
+  - 改动：
+    - 新文件 `ctn_data/memory_profile.py`；
+    - 共享文件 `server.py` 只用 Edit，在 `/api/diagnostics/cpu` 后面加了一个路由。登录保护由现有中间件负责，和 cpu 那个接口一样。另一个会话在 `server.py` 里那一行没提交的注释改动没碰。
+  - 返回内容：
+    - 进程内存：工作集、私有内存、工作集峰值；
+    - 按类型统计的对象数前 30 名，带浅层大小（gc 跟踪的容器对象；str、bytes 和数字不在其中）；
+    - 我们已知缓存的条数（只读已经载入的模块）；
+    - tracemalloc 状态。
+  - tracemalloc 默认关：`?trace=start` 开始追踪；`?trace=top` 列出自开始以后、现在还占着内存的前 25 个代码位置；`?trace=stop` 关掉；其他值返回 400。
+  - 只读，不改任何业务状态。统计对象数要遍历整个堆，一次可能要一两秒。
+  - 用法：第四十五窗口重启后不久，由协调或用户调一次 `?trace=start`；过几个小时再调一次 `?trace=top`，对比两次的类型列表，看哪一类在涨。
+  - 测试：新文件 `tests/test_memory_profile.py`，5 个用例：
+    - 默认不开 tracemalloc，能统计类型和缓存；
+    - start / top / stop 都能用，top 能找到持有内存的测试代码那一行；
+    - 未知的 trace 值会被拒绝；
+    - 读取不改缓存；
+    - 接口没登录返回 401，登录后返回 200，trace 值不对返回 400。
+  - 测试结果：建 app 或者列路由的 48 个模块，加上这个文件，共 482 个测试通过；py_compile 通过。
+- 2026-10-24 22:50（11:50 UTC）**已恢复默认排班（D119 到期，线上数据改动）**：全员无上限三小时结束，协调用 AgentStore.open_existing + store.change 从 settings 删除 shift_schedule override，回落 DEFAULT_SCHEDULE；未碰 enabled。只读备份 `backups/shift-schedule/settings-before-revert-20261024T115017Z.json`。验证 gate：A 组 10783 由 null（无限制）→ ('off_shift', 下班)，C 组 10436 在班内可决策。
+- 2026-10-24 21:2x **用户批准上线：这三项写作修复随下一个窗口（W45）**（用户原话「上线这三项写作改动，并进下一个窗口」，协调 `local_968fe272` 转达，记 D123）。协调已确认三处改动全部在共享工作树：`agent_targeting.PUBLIC_FIGURES`（how 短标签）、`agent_writing.POST_TEMPLATE`（原创给一条具体 Yes 理由）、`agent_pipeline.WRITE_RULES`+`MENTION_FIGURE`（场所顾虑用 FACTS 里的安全保障回答、@提及不复述 how），354 测试通过。W45 等 22:46 悉尼全员不设上限到期、系统稳定后开，和 D120（CONFIRM_MINUTES=10）、gen-failures、Blue 等项一起上线。
+- 2026-10-24 20:5x **green：照抄公众人物说明、neutral 退回两项写作修复，未部署，等用户看过 A/B**（会话「文案识别问题」`9d62c832`，协调 `local_968fe272` 批准三个修法）。只改写作提示，检查的标准不放松（D47）。
+  - 起因：第四十四窗口全员时段的复测，以及第四十二窗口以来 15 条 neutral 退回的抽样。
+    - Hawthorne 的 how 文本被照抄进 17/89 条原创，提到 Hawthorne 的帖子里 68% 都是这句。
+    - neutral 退回里，9 条只解释选票或只提了问题，没给出投 Yes 的理由；6 条用「名单之后通过法规定」回答场所问题，检查按定义判为让步。
+  - 改动：
+    - `agent_targeting.PUBLIC_FIGURES`（B 的文件，只用 Edit）：how 改成短标签。Singh「doctors' union, Yes campaign; hospital staffing and capacity」；Castillo「tourism board, No campaign; tourism and business」；Hawthorne「President; his government would run any access rule」。
+    - `agent_pipeline.write_messages`：MENTION_FIGURE 那句加上「It only tells you what they look after: do not restate it or describe their role」。
+    - `agent_pipeline.WRITE_RULES`：场所那句后面加「Do not say the list will be set later or through regulations…; answer with a safeguard from FACTS instead: the phased start, medical exemptions or the under-12 exemption」。这段还在全队共用前缀里。
+    - `agent_writing.POST_TEMPLATE`：加一句「Whatever the shape, the reader should come away with one concrete reason to vote Yes, as FACTS state it (…): the reason itself, not another "I'm voting Yes because" line, and no consequence FACTS do not state」。
+    - **回复模板不加这句**：第 1 轮 A/B 里，回复加了以后会叠上第二条事实，Jev 从 78% 降到 65%，所以撤掉了。
+    - 测试：
+      - `test_agent_targeting`：how 不超过 60 字符，不含 thank/ask/keep。
+      - `test_agent_pipeline`：MENTION 说明里有「不要复述」。
+      - `test_agent_writing`：原创模板都有 Yes 理由那句，回复模板没有；WRITE_RULES 有场所那句。
+      - 相关 354 个测试通过。
+  - A/B（离线、只读）：
+    - 样本：第四十四窗口全员时段的真实草稿，30 条原创（每条都 @ 了公众人物）和 20 条回复，来自 23 个角色。
+    - 旧 = HEAD `a2f30d1`，旧版 how 也一起用。上游 relace→morph，新旧各跑两遍，然后按线上检查重判。
+    - 第 1 轮（原创和回复都加了 Yes 理由）：原创 neutral 9→3、让步 8→3，但 unsupported 5→14，6 词重复 4→11（「I'm voting Yes because…」）；回复 Jev 78→65%、线上 92→85%。不达标，按上面的方式调整后跑第 2 轮。
+    - **第 2 轮（最终版）**：
+      - **原创（每边 60 条）**
+        - 线上检查通过率：63% → **93%**（neutral 11→1、让步 5→0、unsupported 6→2）
+        - Jev（参照）：57% → 67%
+        - 照抄 how：19/60 → **3/60**
+        - 「名单之后再定」：3 → 0
+        - 长度中位数：422 → 386
+        - 本地检查通过率：88% → 83%，⚠ 6 词重复 7→10
+        - every eligible Kingstonian：8% → 12%，⚠ 选中 phased_after_access 的 6 条全照抄。线上有每小时上限兜底
+      - **回复（每边 40 条）**：回复模板没改，只受 WRITE_RULES 那一句影响
+        - Jev：85% → 78%，⚠ 在噪声范围内：同一份旧提示，第 1 轮 78%、第 2 轮 85%
+        - 线上检查通过率：98% → 95%（39 → 38）
+        - 本地检查通过率：80% → 90%
+        - 不用事实的回复：11 → 9
+      - 缓存命中新版较低（原创 39% 对 61%），因为旧提示正在线上用，缓存是热的；新提示是冷的。上线后同样会热起来。
+  - 上线后检验：
+    - 原创线上检查通过率不低于上线前；neutral 退回减少
+    - 照抄 how 低于 5%；「名单之后再定」约等于 0
+    - 回复 Jev 不变差
+    - every eligible Kingstonian 低于 10%
+    - 6 词重复失败不高于第四十四窗口那一小时（4%）
+- 2026-10-24 20:30 **green — tick 里各角色也共用「帖子 → sources」的转换结果，未部署，和下面 20:3x 那一条一起随下一个窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 批准的 #1）。
+  - 改动（只用 Edit）：
+    - `agent_observation._local`：局部窗口里的帖子转成 sources 的那一步（`_post`），在本轮内只做一次，存在 tick 缓存的 `sources` 里，键和查询的一样；每个角色拿到的都是自己的一份浅拷贝（`dict(source)`）。news 那一段仍然按角色用自己的 `news_versions` 算。
+    - `agent_control.tick`：缓存里加上 `'sources': {}`。
+    - 缓存只在 tick 自己的线程里有效，tick 结束一定清空，绝不跨轮。判定逻辑一行不改。
+  - 为什么可以共用：tick 里只有 `pending_revision` → `_new_sources` 会用到这些 sources，它在改动之前都会先 `dict(source)` 复制一份；`observe()` 只在生成任务的线程里跑，拿不到 tick 的缓存。即便这样，每个角色还是各给一份拷贝。
+  - 测试：`tests/test_agent_lock_load.py` 新增 1 个。一轮里两个角色 `_post` 一共只调用 3 次（3 条帖子；不共用时是 6 次），每个角色拿到的 sources 和不共用时完全相同，一个角色改了自己那份，不会影响另一个角色。原来那 4 个测试（revision 相同、每一轮重新查并且马上看到新帖、inbox 一变就重算、其他线程拿不到缓存）都还在，也都通过。涉及 observation、tick、竞赛的 49 个模块共 799 个测试通过，py_compile 通过。
+  - 只读实测（线上库，这时可算的角色有 19 个）：每一轮 pending_revision 不共用时 1,991–2,199 ms，两项都共用后 1,091–1,296 ms，少了约 43%（只共用查询时是 33%）。
+- 2026-10-24 20:3x **green — tick 里各角色共用本轮的局部窗口查询，未部署，随下一个窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 批准）。
+  - 只读实测（改前）：一轮 tick 里 23 个角色算 pending_revision 要 2.3–2.7 秒，其中 66% 在 `_local`：每个角色重复同样的三条 SQL，一轮 688 次。
+  - 改动（只用 Edit）：
+    - `agent_observation._local`：只改取数据那一段。新增 `_tick_rows()`；三条查询的结果在本轮内共用，键是截止时间和条数；只有在 tick 自己的线程里、并且 tick 设置了缓存时才共用，否则照旧每次都查。连接也只在要查的时候才打开。
+    - `agent_control.tick`：原来的函数体改名为 `_tick_once()`；`tick()` 开始时建好缓存 `{thread, now, rows}`，截止时间统一用本轮的 now，并且在 `finally` 里一定清空。
+  - 判定逻辑一行不改；news 那一段仍然按角色用自己的 `news_versions` 算；绝不跨轮复用；其他线程（生成任务）照旧自己查。
+  - 测试（`tests/test_agent_lock_load.py` 新增 4 个）：
+    - 一轮里两个角色只查 3 次（不共用时是 6 次），而且 revision 和不共用时完全相同；
+    - 每一轮都重新查，两轮之间新加的帖子马上就能看到，tick 结束后缓存是空的；
+    - 同一轮里 inbox 来了新通知，revision 马上就变；
+    - 其他线程拿不到 tick 的缓存。
+  - 变异检查：故意让缓存跨轮复用，「每一轮都重新查」那个测试会失败。
+  - 测试结果：涉及 observation、tick、竞赛的 49 个模块共 798 个测试通过，py_compile 通过。
+  - 改后只读实测（线上库，同一份快照）：每一轮 pending_revision 从 2.38–2.74 秒降到 1.61–1.85 秒，少了约三分之一，每一轮省约 0.8 秒。剩下的开销，以及下一步可以做的，见共享笔记。
+- 2026-10-24 20:05 **PG `/dev/shm` DiskFull：热修已在线上生效并复核；永久修排进下个维护窗口**（会话 `0a84fe37`。热修由协调 `local_968fe272` 执行，用户在协调会话里直接批准，见 D122）。
+  - 复核（只读，20:04）：
+    - `enable_parallel_hash = off`，来源是 `postgresql.auto.conf`，没有待重启的配置；PG 日志显示 09:03:10 UTC（20:03 Sydney）生效。
+    - 4 条代表查询的计划：处理页积压计数、处理页立场分组、采集作者刷新、pipeline 的 posts×counter_sampling。仍然是 Gather / Gather Merge 加 2 个 worker 并行，但全部改成每个 worker 自己建私有 Hash，没有 Parallel Hash，不再占 /dev/shm；不加会话级设置的新会话里，Parallel Hash 节点数为 0。
+    - 后台每分钟查一次 PG 日志里的 DiskFull，一直盯到 22:47（全员无上限结束），一旦出现马上报告。
+    - 22:47 结果：从 20:04 到 22:47 共查了 159 次，09:03:11 UTC 以后 PG 日志里 DiskFull **0 条**；后端 err.log 里仍然只有 19:34 修复前那一次；每分钟检查时 /dev/shm 最高 2.6MB / 64MB。
+  - 下面是 20:01 写的方案原文（热修那段已作废，已经执行过了）。
+- 2026-10-24 20:01 **PG `/dev/shm` DiskFull：热修等用户批准；永久修排进下个维护窗口**（会话 `0a84fe37`，协调 `local_968fe272` 批准了方案）。
+  - 现象：`could not resize shared memory segment … No space left on device`。容器启动以来只出现过 1 次，在 08:34:53 UTC（19:34 Sydney，全员无上限期间 PG 的 CPU 高峰），是处理页积压计数（`processing_view.py:63`）的主进程和 2 个 worker 同时报错。实测：只有 1.5% 的采样点有并行 worker，最多同时 2 个；/dev/shm 最高 2.6MB / 64MB。影响只是那一次请求失败，页面缓存 120 秒后自动恢复。
+  - 原因：这条查询的计划是 Parallel Hash Left Join，共享哈希表放在 /dev/shm（posix DSM），内存预算是 16MB × 2 × 3 个进程，最多 96MB，超过容器默认的 64MB。和 shared_buffers 无关。coverage 和 analytics 那三条慢读不是并行计划，和这个问题无关。
+  - **热修（未执行）**：`ALTER SYSTEM SET enable_parallel_hash = off; SELECT pg_reload_conf();`，不用重启，并行扫描、聚合照常。线上用普通 EXPLAIN 验证过：积压计数仍然是 2 个 worker 并行，改用各自的私有哈希。Claude Code 的安全检查拦下了这条线上配置改动，**要用户本人批准，或者用户自己执行**。线上值仍是 on（default）。
+    - 备份：`backups/pg-config-20261024/settings.before-parallel-hash.txt`、`postgresql.auto.conf.before-parallel-hash`。
+    - 回滚：`ALTER SYSTEM RESET enable_parallel_hash; SELECT pg_reload_conf();`。
+  - **永久修（下个维护窗口，要重启 PG，用户同意后由协调执行）**：
+    1. 方案 (a)，推荐：在 `compose.yaml` 的 postgres 服务下加一行 `shm_size: 1gb`；
+    2. 窗口里先执行 `docker exec ctn-postgres-1 psql -U ctn -d ctn -c "CHECKPOINT;"`；
+    3. 再执行 `docker compose up -d postgres`：重建容器，数据在 `ctn_postgres` 卷上不会丢，约 10–20 秒停机；
+    4. 等 healthcheck 变成 healthy，执行 `docker exec ctn-postgres-1 df -h /dev/shm`，应显示 1.0G；
+    5. **如果热修已经执行过，恢复默认**：`ALTER SYSTEM RESET enable_parallel_hash; SELECT pg_reload_conf();`，再执行 `SHOW enable_parallel_hash`，应为 on；
+    6. 检查 `/api/health` 正常，采集段 `collection.stalled` 为 false（第三十八窗口以后采集线程会自己重连）。
+  - 备选方案 (b)：不重建容器，执行 `ALTER SYSTEM SET min_dynamic_shared_memory = '256MB'` 后重启 PG（步骤同上次 shared_buffers 那次），并行查询的共享内存会先从主共享内存里分配。不做 mmap。
+- 2026-10-24 20:0x **green — D120 影子复核阶段 2：`CONFIRM_MINUTES = 10`；未部署，随下一个窗口上线**（会话「Blue 页改为账号为单位」`19af4a8e`，协调 `local_968fe272` 转来用户原话：「改吧」）。
+  - 依据：上线后 1.5 小时，56 条待复核帖子在第 5、10 分钟都还是 404，没有一条恢复；其中已到 20 分钟的 46 条全部确认隐藏。
+  - `risk_assessment.py`：
+    - `CONFIRM_MINUTES` 从 20 改成 10：第一次 404 满 10 分钟后再 GET，仍是 404 就确认，写进 `hidden_posts`；不满 10 分钟不确认；中途 GET 到 200 的标回可见，不确认。到期复核本来就每 60 秒检查一次，不用另加调度。
+    - 影子复核从「第 5、10 分钟」改成「第 5、20 分钟」：第 10 分钟那次现在就是正式确认，再查一次只是重复请求。第 20 分钟这次查的是 10 分钟时已确认的帖子，只记录：如果平台又能返回，就是 10 分钟规则判错的一条，会出现在 `shadow_summary` 里 20m 的 back 计数中。为此 `shadow_due` 也会对已确认隐藏的帖子做这次检查。
+  - 写着「20 分钟」的地方都改了：`hidden_posts.py`（R 的文件）的说明和日志改为引用常量；`blue_view.py` 的提示语和注释去掉了具体分钟数；`server.py` 的一行注释；`RiskAssessment.tsx` 的页面说明和「复核确认」那一行改成显示 `rules.confirm_minutes`。
+  - 测试：
+    - `test_risk_assessment`：满 10 分钟仍是 404 就确认、不满 10 分钟不确认、10 分钟内恢复 200 的不确认并标回可见、调度顺序（5 分钟影子复核 → 10 分钟确认 → 20 分钟影子复核）；
+    - `test_risk_shadow` 改成 5m 和 20m，包括 20 分钟时恢复的帖子只记录、不动 status；
+    - 后端相关 103 个通过；前端 RiskAssessment 7 个通过；tsc 通过。
+  - 没有表结构改动。
+- 2026-10-24 19:xx **green — 缓存方案 B：写作提示重排，未部署；方案 C 没做**（会话「文案识别问题」`9d62c832`，协调 `local_968fe272` 转来用户原话：「直接改成 Relace 优先，标注不变，然后那个缓存优化做一下吧」）。方案 A 已由 gen-failures 做完；D 按用户要求不做。
+  - **Relace 探针**（只读库，一共 15 次小调用，约 $0.003）：
+    - 缓存按 **128 token 一块**计算，结果完全确定：同样的前缀每次都命中，不像报告里推断的 Morph 那样只有 40–70% 的命中概率。
+    - 共享前缀不到约 480–510 token 时一块都不算：改动点在第 117 / 254 个 token 时命中 0，在第 508 个 token 时命中 384，第 820 个时 768，第 1172 个时 1152。
+    - **schema 不插在 system 和 user 之间**：只换 schema 的枚举值，仍然命中 2688/2809，所以只要稳定内容在前面就行，放在 system 还是 user 都可以。
+  - **B 的改动**（只调顺序和位置，措辞基本不动）：
+    - `agent_pipeline`：写作的 system 拆成三段，按顺序是 `WRITE_RULES`（全队共用的规则，第一句不含名字）→ `DO_NOT_CLAIM`（从 user payload 挪进 system）→ 原创或回复模板的固定部分 → `WRITE_PERSONA`（名字、立场、语气）→ `WRITE_TASK`（字数、要回答的担心、抽到的两种写法和结尾、标签和 @ 规则）。MENTION_FIGURE 说明还是放在最后。`WRITE_SYSTEM` 只保留成提示预览用的完整版式（`fact_routes`）。
+    - `agent_writing`：
+      - 两个模板去掉了抽签占位，改成「Pick whichever of the two shapes/moves in TASK…」「End as TASK says.」两句衔接语；
+      - 抽到的内容放进 `POST_DRAWN` / `REPLY_DRAWN`；
+      - 新增 `post_guide_parts` / `reply_guide_parts`，`post_guide` / `reply_guide` 保留，返回两部分拼起来的全文；
+      - 抽签的随机数用法不变，所以抽到各种写法的分布也不变。
+    - 和方案 A 叠加：改写时用同一个种子，system 和第一稿完全一样，只是 user 末尾多了 FIX_THESE_ISSUES。
+    - 测试：
+      - `test_agent_writing` 新增「从共用到本次」的顺序测试：两个角色在人设之前完全一样，同一个种子得到同一份提示；
+      - `test_agent_pipeline`：DO_NOT_CLAIM 移到 system，用 guide 的两部分做断言。
+      - 相关 352 个测试通过。
+  - **B 的跨角色探针**（真实提示，Relace）：同一种动作，第二、第三个角色的第一稿各命中 **768** token（规则 + DO_NOT_CLAIM + 模板）；原创帖和回复之间也能共用约 384 token。
+  - **C 没做**：按报告的写法重排后，全队共用部分约 450 token，在 Relace 上只命中 384 token，约占决策输入（约 5,300）的 7%。按 Relace 价格，每天约少 $0.06。改决策提示有影响动作选择的风险（D79 时「原创帖」从 2/30 变成 8/30），收益不值得。E（重试提示）和 F（检查里人设的位置）也没做：重试每天约 8 次；检查本来就 87% 命中。
+  - **A/B**（离线、只读）：
+    - 样本：第四十一窗口之后的真实草稿，30 条回复和 20 条原创，来自 20 个角色。
+    - 旧 = HEAD `71d6c32`，新 = 工作区。按线上上游 relace → morph 跑，用线上的写作参数和每个角色的 session。
+    - 第 1 遍新旧交错着跑，第 2 遍再跑一遍看缓存。
+    - 线上检查：原创走 DeepSeek，回复先过 Jev，没过的再走 DeepSeek。
+    - **回复（每边 60 条）**
+      - Jev 通过率：82% → 82%
+      - 线上检查通过率：87% → **90%**
+      - 本地检查通过率：70% → **80%**（照抄事实原文 13 → 7）
+      - 长度中位数：282 → 255
+      - 缓存命中：第 1 遍 1.4% → **24.6%**，第 2 遍 2.0% → **33.5%**
+      - 每次花费：$0.00059 → $0.00044
+      - 耗时 p50：第 1 遍 5.8 → **4.1 秒**，第 2 遍 5.0 → 3.8 秒
+      - 套话（government says、eligible、自报职业、和最近开头相同）：两边都约等于 0
+      - 不用事实的回复：14 → 22（估算），⚠ 这一项多了，但 Jev 和检查通过率都没有因此下降
+    - **原创（每边 40 条）**
+      - 线上检查通过率：70% → 72%
+      - Jev（参照）：55% → 62%
+      - 本地检查通过率：85% → **92%**
+      - 长度中位数：433 → 427
+      - 缓存命中：第 1 遍 0% → **25.0%**，第 2 遍 1.5% → **34.6%**
+      - 每次花费：$0.00112 → $0.00081
+      - 耗时 p50：第 2 遍 10.0 → 8.4 秒；p90：第 1 遍 24.4 → 18.9 秒
+  - **结论**：质量没有变差（检查通过率和本地检查都略升），写作的缓存命中从约 2% 升到 25–35%。在 Relace 上命中缓存也能明显缩短耗时，回复 p50 快约 1.2–1.7 秒。花费的下降里有一部分来自回复变短，按每次实测：回复省约 25%，原创省约 28%。
+  - 上线后检验：`llm_calls` 里 write 的 `cached_tokens` 命中率高于 20%；回复先过 Jev 的比例、生成失败率不变差；write 的 p50 耗时不变长。
+- 2026-10-24 18:3x **green — 同一份草稿改写时沿用第一稿的写作指南，未部署，随下一个窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 转达，依据 `reports/generated/prompt-cache-analysis-20261024.md` 的方案 A）。
+  - 改动：`agent_control._staged_decision`，只用 Edit，3 行。每份草稿从 `random` 抽一个 64 位种子，每次调用 `write_messages` 都用这个种子新建一个 `random.Random(seed)`。`write_messages` 和 `agent_writing` 都没动。
+  - 效果：改写请求和第一稿只差末尾的 FIX_THESE_ISSUES；第 2 次换事实那次例外，因为新事实可能改变 `news`。
+  - 写作时草稿还没建，没有 draft_id，所以改成每次决策抽一个种子。第一稿抽到什么的分布不变，不同的草稿仍然各自随机。
+  - 测试（`test_agent_pipeline` 新增 2 个，两个测试类里都跑）：
+    - 改写和第一稿的 system 完全相同，改写请求的正文以第一稿的整份请求开头，只在末尾多了 FIX_THESE_ISSUES；
+    - 每份草稿只抽一次种子，指南就是这个种子生成的那一份，换一个种子就是另一份指南。
+  - 相关 8 个模块共 135 个测试通过，py_compile 通过。
+  - 线上 A/B（改写调用的 cached_tokens、改写后的 Jev 通过率和本地检查通过率）要等上线、并且 Agent 重新打开以后才能看。
+- 2026-10-24 18:1x **green — 影子复核阶段 1：第 5、10 分钟各多查一次，只记录；未部署，随第四十三窗口上线**（会话「Blue 页改为账号为单位」`19af4a8e`，协调 `local_968fe272` 转达用户原话：「先做影子复核（5 分钟和 10 分钟各多查一次，只记录），没有恢复的话改成 10 分钟确认、每 5 分钟跑到期复核」）。
+  - **有表结构改动**：共享文件 `db.py` 的 SCHEMA 新增 `post_visibility_shadow(post_id, check_label, checked_at, http_status, minutes_after_first_404, first_404_at)`，主键 `(post_id, check_label)`。`post_visibility` 现有的列没动。
+  - `risk_assessment.py`：
+    - 常量：`SHADOW_CHECKS = (('5m', 5), ('10m', 10))`、`SHADOW_LATE_MINUTES = 10`（迟到超过这么多就跳过，所以只查新出现的待复核帖子）、`DUE_CHECK_SECONDS = 60`。`CONFIRM_MINUTES = 20` 没改，阶段 2 只需要改这个常量。
+    - `shadow_due()` 和 `shadow()`：
+      - 第一次 404 之后满 5 分钟、满 10 分钟各匿名 GET 一次，只写影子表（时间、HTTP 状态、实际间隔），不改 `post_visibility` 和 `hidden_posts`，也不改确认规则。
+      - 每个检查点有了答复（200、404、410）就不再查；没答复的照旧等 `RETRY_MINUTES` 后重试；中途已经恢复可见的帖子不再查。
+    - `RiskMonitor` 的顺序改为：旧记录复核 → 影子复核 → 到期复核 → 最新 6 小时 → 全量。
+    - 长扫描（翻页和单条 GET）的间隙，每 `DUE_CHECK_SECONDS`（60 秒）看一次有没有到期的影子复核或到期复核，有就先做。
+      - 这样影子复核能落在第 5、10 分钟附近，确认也能落在 20 分钟附近，不用再等下一轮扫描。原来确认延迟的中位数是 27 分钟，主要就是在等扫描。
+      - 阶段 2 的「每 5 分钟跑到期复核」已经被这个覆盖了（每 60 秒看一次），只需要改 `CONFIRM_MINUTES = 10`。
+    - `shadow_summary()`：只读汇总，放进了 `/api/risk/overview` 的 `shadow` 字段。按检查点分别给出：查到答复的条数、仍是 404 的、恢复 200 的、没答复的、实际间隔的中位数；再给出这些帖子现在的状态（已确认隐藏、可见、仍待复核）。
+  - 请求量：每条新出现的待复核帖子多 2 次 GET。按今天的量，每小时新增的待复核帖子大约几十到一百多条，所以每小时多一两百次请求，限额照旧。
+  - 测试：
+    - 新增 `tests/test_risk_shadow.py`（7 个）：只在规定时间点各查一次、不改状态、20 分钟照常确认、迟到就跳过、没答复按重试处理、中途恢复的不查、汇总数字、overview 带汇总、长扫描间隙会做到期复核且 60 秒内只做一次。
+    - `test_risk_assessment` 里的调度测试改成包含影子复核这一步。
+    - 风险、hidden_posts、账号识别、pipeline、Blue、spa 相关共 102 个通过；compileall 通过。前端没有改动。
+- 2026-10-24 17:4x **green — Blue 候选（`blue_reports.candidates`）改到子进程里算，接口返回各段耗时；未部署，随第四十三窗口上线**（会话「Blue 页改为账号为单位」`19af4a8e`，协调 `local_968fe272` 批准了方案 1–5 和补充的三点）。
+  - 起因：后端有一个核快占满了。线上只读实测，`candidates()` 每轮墙钟约 20 秒、CPU 16.7 秒。大头是合并之前就有的几段：behaviour 4.1–4.6 秒、texts 4.7–5.3 秒、clusters 和 sides 4.1–7.5 秒；D99/D100 合并只多了约 1 秒。所以选了子进程，没选延长缓存。
+  - `blue_reports.py`：
+    - `candidates(timing=…)` 按段记录墙钟和线程 CPU：read_own_unavailable、behaviour、read_posts_accounts、texts、calibration、style_citizens、evidence、select_actions、clusters_sides、result，另加帖子数。
+    - `candidates_isolated()`：用 `python -m ctn_data.blue_reports` 起子进程，低优先级，超过 300 秒就杀掉。数据库 URL、limit 和文风快照从 stdin 传进去，结果用 JSON 读回来。
+    - 子进程的环境里设了 `PGOPTIONS=-c default_transaction_read_only=on`，它开的每个 PG 会话都是只读的。子进程不发任何平台请求；可访问性核验的 GET 仍在父进程里做，限额和日志都和以前一样。
+    - `style_snapshot()`：只传 candidates 用得到的 5 个字段（style_group、group_size、group_hidden_accounts、possible_teammate、linked_to_ours）。
+  - `style_groups.py`（子 agent 的文件，只用 Edit）：新增只读的 `listed_accounts()`，原有行为没改。
+  - `blue_view.py`：
+    - `build(isolated=…)` 返回 `timing`：candidates 各段、candidates_seconds、availability_seconds、accounts_seconds、total_seconds、finished_at，在 `/api/blue/candidates` 里能看到，同时记一行 INFO 日志。
+    - `BlueCandidates(isolated=…)`：后台刷新失败时保留上一轮结果，错误放进 `refresh_error`，不退回到进程内计算。
+    - 举报后重建缓存时，timing 也保留下来。
+  - 共享文件 `server.py`：改为 `BlueCandidates(db, isolated=True)`。
+  - 线上只读实测子进程：父进程 CPU 0.03 秒（原来在进程内约 17 秒）；子进程墙钟 21.1 秒、CPU 16.5 秒，返回 50 条；只读设置下没有报错。
+  - 测试：
+    - 新增 `tests/test_blue_isolated.py`（10 个）：各段耗时、文风证据用传进去的数据、快照只带 5 个字段、listed_accounts 随缓存过期；真起子进程跑 SQLite，结果和进程内一致，文风证据也传过去了；子进程失败或超时会报错；isolated 的 build 记录 timing；刷新失败保留旧结果；举报后重建缓存不丢 timing。
+    - `test_blue_view` 里的一个假 candidates 加上了 timing 参数。
+    - Blue、文风、文案、风险、hidden_posts、spa、pipeline、clusters 相关共 157 个通过；compileall 通过。前端没有改动。
+- 2026-10-24 17:58 **green — agent_control 锁争用修复 C → A → D，以及角色上限不再计入已封号的账号。未部署，随第四十三窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 批准；B 不做）。都只用 Edit。
+  - C（`agent_control._competition_tick`；`agent_competition` 的 `sync` / `record_published` / 新增 `receipt_drafts`、`prefetch_receipts`）：
+    - 竞赛模式为 off 时，不再跑 sync 和 maintain 这两次整库事务。
+    - sync 的文档写明「off 时也要记首次就绪时间」，所以 off 时改成：在锁外拿快照的副本跑一遍，算出有变化才用 `change_budget` 写入，平时一次锁都不拿。
+    - 不为 off 时，按水位 `receipts_synced_through` 只查最近一小时内新发布的草稿（重叠一小时，照顾晚确认的发布）。收据在锁外用一条 `IN (...)` 预取；锁内只有预取到、身份又一致的才省掉逐条查询（这种情况原本也什么都不改），其余照旧。
+  - A（`agent_control.tick`）：
+    - `read_budget` 只读一次；
+    - 观测循环这一轮没有处理任何角色时，不读第二次 `store.read()`；
+    - 两个游标合并成一次写；
+    - `tick()` 返回这一轮有没有做事，loop 做了事等 2 秒、没做事等 5 秒（`SCHEDULER_BUSY_SECONDS` / `SCHEDULER_IDLE_SECONDS`）。
+    - 及时性：生成完成后由 worker 直接发布，手动操作走 API，排班 gate 不变；只有延迟回复和 next_run_at 到期要等 tick，空闲时最多晚 3 秒。
+  - D（不删除，只搬走）：
+    - 游标拆到单独的 meta 行 `agent_control_cursors_v1`。它不在 `agent_control_v1:` 前缀下，整库读写都不会碰到；写入是一次小的 upsert，不拿锁。新行还没有的时候，沿用 rate 里的旧游标。
+    - 新增 `agent_competition.needs_offload` / `offload`，写进冷存储行 `agent_competition_cold_v1`：
+      - mode=off 时，`posts` 和 `daily_views` 搬过去，竞赛页从冷存储行读最近 100 条；
+      - 任何模式下，1 小时以前的 `model_requests` 都搬过去，冷存储行最多保留 500 条；1 小时内的重试仍然用同一个模型；
+      - `rounds` 不动，`pending_samples` 清掉；
+      - 迁移是幂等的。
+    - 备份：`backups/rate-before-cold-rows-20261024/`（rate 三行原样，06:48 UTC）。**协调：重载前请再备份一次**，这几行一直在变。
+  - 角色上限（用户原话「角色数不包含被封的了」）：
+    - `save` 新建角色和 `settings` 修改上限时，只数没被封的角色（`account_status.suspended()` 名单里的账号，加上 agent 行上的 `account_suspended`）。
+    - `account_status.suspended()` 新增 `strict=True`：读不出来时返回 None，这时退回原来的全数口径。其他调用方行为不变。
+  - 测试：
+    - 新增 `tests/test_agent_lock_load.py`（7 个）；`test_agent_competition` 新增 4 个（只查新草稿、预取省掉查询但冲突照旧标记、冷存储行和竞赛页、重试用同一个模型）；`test_agent_suspended_skip` 新增 2 个、`test_account_status` 新增 1 个（角色上限和 strict）。
+    - 因为存储位置或调用顺序变了，最小改动了 4 个已有测试：`test_agent_competition_integration`（模式设成 observe）、`test_agent_read_performance`、`test_agent_actions`、`test_agent_competition_budget_storage`（游标改读新行）。
+    - 涉及竞赛、tick、budget 的 45 个模块共 749 个测试通过；角色上限和停权相关的模块又跑了 81 个，也通过；`verify_agent_competition_postgres` 在临时库上 11 项全过；py_compile 通过。
+  - 改前基线（只读）：06:15 UTC，锁被持有 87%，持锁 p90 4.29 秒，后端 0.98 核。上线后用同样的方法再测一次，写进共享笔记。
+- 2026-10-24 16:45 **green — `citizen_replies_6h` 在 PG 上的口径问题：没有复现出 PG / SQLite 差异；线上的值是对的；已修好「判不了时把所有人都算成市民」的隐患。未部署，随第四十二窗口上线**（会话 `0a84fe37`，协调 `local_968fe272` 转来 gen-failures 的报告）。
+  - 复现：
+    - 在当前代码上跑 `verify_pipeline_postgres` 4 次，8/8 全部通过。
+    - 逐条看了市民规则链路里的每个查询，没有 PG / SQLite 语义差异：时间比较两边都是同格式的 ISO 文本，JOIN 不会重复计数，SUM 也已经转成 int。
+    - gen-failures 看到的数字（10 条全算市民、3 条全算市民）正好对应一种情况：规则里所有排除都失效了。
+      - 缓存过期解释不了 40 号（发得太多）和 41 号（转发圈）也没被排除，因为这两项每次都现查。
+      - 只能是 `non_citizen_reasons` 主体里抛了异常，被 `except Exception: return {}` 静默吞掉，于是谁都不排除。
+    - 当时为什么抛异常已经查不到了：临时库已删，代码里也没有留下日志。最可能是那段时间工作区或环境的临时状态。
+  - 线上只读实测（16:40）：
+    - 方法：会话设为只读，加了 initialize 防护，并记录链路里每一次查询报错。
+    - 6 小时：回复我方 64 条、59 个回复者；排除 14 个机器人、16 个非市民（发得太多 15、文风 13、校准 4、资料 2，有重叠）、1 个我方。市民回复 **29** 条。
+    - 24 小时：378 条回复里市民回复 96 条。
+    - 链路里查询报错 **0 次**，所以首页的数值没有算多，29 就是规则下的正确值。
+  - 修复（默认行为不变，选目标的逻辑也不变）：
+    - `agent_targeting.py`：`non_citizen_reasons`、批号名检查、`bot_accounts` 判不了的时候，改为记一条 warning（同一处 5 分钟最多一条），不再静默；新增可选参数 `strict`（`non_citizen_reasons` / `non_citizens` / `citizen_accounts`），为 True 时直接抛错。
+    - `citizens.citizen_authors` 把 `strict` 透传下去。
+    - `pipeline.citizen_replies` 用 `strict=True`：规则判不了时，市民回复数显示「未知」（None，首页显示「—」，标题里也是「—」）并记 warning，不再把所有回复都算成市民回复。
+    - `verify_pipeline_postgres.py` 的 setUp 每个测试前清空 `agent_targeting` 和 `npc_calibration` 的按库缓存：PG 跑法所有测试共用一个 DSN，不清的话前一个测试的缓存会带进下一个。
+  - 测试：
+    - 新增 `test_pipeline` 的「检查失败时显示未知」，以及 `test_agent_targeting` 的「失败记日志、strict 会抛错」；
+    - SQLite 33 个通过；PG 验证 9/9 通过（含新测试）；
+    - 用到市民规则或 pipeline 的所有测试模块共 309 个通过。
+- 2026-10-24 16:4x **green — 已被平台停权的账号在运行时直接跳过，未部署，随第四十二窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 批准）。起因：Colin（11746）被停权以后仍然开着、在自动模式下重试，每一轮都先调用模型，再撞一次 403。
+  - 改动（`agent_control.py`，B 的文件，只用 Edit）：
+    - 新增 `_suspension` / `_refuse_suspended` / `_note_suspended`，以及常量 `SUSPENDED_SKIP`、`SUSPENDED_NOTE_SECONDS=3600`。
+    - `tick`：每轮读一次 `account_status.suspended()`（自带 60 秒缓存，读不出来时返回空），以下三处都跳过停权账号：
+      - 通知轮询（不调用平台）；
+      - 竞赛候选（不参与分配）；
+      - 调度（不发送，也不做新决定），并且把这一轮让给下一个角色。
+      - agent 行上的 `account_suspended` 也算停权。
+    - `start_generation` 和 `_run` 遇到停权账号报 403「账号已被平台停权，已跳过：不调用模型，也不调用平台」。403 不会被当成等待重试。
+  - 审计：调度跳过时记一条 `account_suspended` 事件，带着官方通知的原文和 `account_id`。每个角色每小时最多一条，记录时间存在 `rate.suspended_notes` 里，事件走 `change_runtime`，不整库重写。
+  - 不改 `enabled`，也不改任何角色数据，停用仍然由用户决定。
+  - 没覆盖的地方：`agent_manual.drain_queue`（人工发帖排队）。D36 以后手工发帖已经关闭，队列是空的。
+  - 测试：
+    - 新文件 `tests/test_agent_suspended_skip.py`，6 个用例：
+      - 停权角色不被调度、不被轮询，这一轮给了下一个角色；
+      - 每小时最多一条记录；
+      - agent 行上的标记也算；
+      - 停权名单读不出来时照常运行；
+      - 没被停权的角色不受影响；
+      - 手动启动和 `run()` 都报 403，模型、读取和提交都不调用。
+    - 变异检查：让 `_suspension` 恒返回 None，6 个里有 4 个失败，剩下 2 个本来就是测「照常运行」的。
+    - tick、调度、竞赛、人工发帖、pipeline、audit、generation 相关共 364 个测试通过，py_compile 通过。
+- 2026-10-24 16:29 **green — 被退回的正文和问题记进 generation_failed，未部署，随第四十二窗口上线**（会话「生成失败率修复」，协调 `local_968fe272` 已批准）。
+  - 背景：两次都没通过检查的草稿，以前只留下一句失败消息，看不到正文，也分不出是原创还是回复。
+  - 改动（都只用 Edit）：
+    - `agent_control.py`：抛出「两次未通过」的 AgentError 时，带上 `rejected = {action, body, issues}`。失败消息本身不变。
+    - `agent_generation.py`：失败路径把 `rejected` 传给 `_finish`，只有 `status=failed` 时合并进 details。新增 `_rejected_details`，只认 `action` 为 post 或 reply。
+    - `agent_audit.py`：
+      - 新增 `rejected_fields()`：正文截到 300 字，问题最多 4 条、每条截到 200 字，都先经过 `_SECRET` 清洗；
+      - `_safe_details` 允许 `rejected_body` 和 `rejected_issues` 这两个字段；`action` 本来就在允许列表里。
+  - 不会写进凭据：正文和问题只来自模型的输出和我们的检查；先经过清洗，归档时再按允许列表清洗一遍。
+  - 日志页（`AgentLogs.tsx`）只显示有中文标签的字段，所以新字段不会出现在页面上，只能查库。
+  - 测试：
+    - `test_agent_audit`：清洗、截断、非文本丢弃；
+    - `test_agent_generation_jobs`：经过后台任务，失败事件带上 action、正文和问题，敏感字段被清掉；
+    - `test_agent_generation_phase`：完成的任务不带这些字段；
+    - `test_agent_pipeline`：错误对象上带着 rejected。
+  - 测试结果：相关模块共 371 个测试通过，py_compile 通过。
+  - 另外发现：`verify_pipeline_postgres` 在 PG 上有 2 个失败，都在 `citizen_replies_6h` 的口径（期望 2、实际 10，期望 2、实际 3），和这次改动无关，SQLite 版本的 `test_pipeline` 是通过的。临时库已经删掉。
+- 2026-10-24 16:0x **green — 不在帖子里报职业或身份，也不反复用同一套开头。未部署，和事实上限修复一起进第四十一窗口**（会话「文案识别问题」`9d62c832`，协调 `local_968fe272` 转来 gen-failures 的报告）。
+  - 原因：
+    - 上线后（03:01 UTC 起）69 条原创里有 27 条（39%）自报职业或身份，停机前是 14%。例子有「I run a hall」「My hall calendar…」「On air I read fine print for a living」「on my show」「my cab」。
+    - 这是 D90 封号审查里「I run a café」×19 的同一种模式。6 词检查拦不住，因为每次换了个说法。
+    - 根源是 D97 加的「从自己的工作或社区说起」这种写法，和 WRITE_SYSTEM 里「背景决定你在乎什么，不要复述背景」冲突。这是我设计时的疏漏。
+  - 改动（D47：这是不重复自己、不编造经历，属于 D90 的范围，不是按识别规则去调写法）：
+    - `agent_writing.py`
+      - 原创模板：人设决定在乎什么、从哪个角度看，不说自己的职业或身份（「I run」「I work」「my shop」「on my show」「as a …」），不复述背景。开头要和 YOUR_RECENT_OPENINGS 里的每一条都不同。
+      - 「从自己工作说起」这种写法改成「从一件看到或注意到的具体日常小事说起，再带出那条事实」。
+      - 回复模板加上：不说自己的职业或身份，开头和 YOUR_RECENT_OPENINGS 不同。「接住对方细节」那种回应方式，从「从自己的工作或社区出发」改成「从你的人设在乎的角度出发」。
+    - `agent_pipeline.write_messages`：payload 新增 `YOUR_RECENT_OPENINGS`，是这个角色最近 10 条帖子各自的第一句，每句最多 120 字符。`agent_control._staged_decision` 把最近 20 条正文（原本就给本地检查用的那份 `recent`）传给 `recent_posts`。RECENT_OWN_POSTS 还是只取最后 5 条，这部分不变。
+    - `agent_pipeline.local_issues` 新增本地检查 `self_intro`：这条帖子自报职业，而且这个角色最近 10 条里已经有至少 2 条也自报过，就退回重写一次。
+      - 判断用的是自报职业的句式，比如「I run / I work / I drive / I teach / I book…」「Running a …」「for a living」「my hall / shop / show / cab / ward / class…」「on my show / on air / in my job…」「as a nurse / teacher / driver…」。「I ran the numbers」这种不算。
+      - 只偶尔提一次的不会被退回，用来避免生成失败大量增加。拿上线后的真实帖子回放，旧模板下会退回 11/120；新模板下 A/B 里一次都没触发。
+    - 测试：
+      - `tests/test_stock_lines.py` 新增 `SelfIntroTests`：
+        - 自报职业成了习惯的会被退回，包括 hall、on air、on my show、as a teacher、drive a cab 这几种说法；
+        - 只提过一次、10 条以前提的、或者不是在报职业的，都不算；
+        - 写作的 payload 里带上最近的开头，系统提示里有对应的要求。
+      - 和事实上限修复合在一起，相关 321 个测试通过。
+  - A/B（离线，只读）：取上线后已发布的草稿，随机 20 条原创、20 条回复，来自 14 个角色，每条沿用当时的输入和当时最近 20 条正文。旧版是线上现在的 HEAD `7f06631`，新版是工作区，每条两边各写 2 次。线上检查的做法和之前一样：原创走 DeepSeek，检查时两边都能看到被 @ 的公众人物；回复先过 Jev，不过再走 DeepSeek。
+    - **原创（各 40 条）**
+      - 自报职业或身份：10/40（25%）→ **0/40**
+      - 被 self_intro 退回：5 → 0
+      - 开头和自己最近的开头相同：2 → 0
+      - 6 词重复（「重复自己最近的说法」）：16 → 11
+      - 本地检查通过率：50% → **72%**
+      - 线上检查通过率：85% → **92%**
+      - 长度中位数：429 → 408
+      - 同一轮里两条帖子开头前三个词相同：0 → 4/40（「when you picture」「a full ward」各 2 条），继续观察
+    - **回复（各 40 条）**
+      - 自报职业：1 → 0
+      - Jev 通过率：82% → 80%
+      - 线上检查通过率：95% → 90%（38/40 → 36/40，样本小，主要多了 2 条「判为让步」，继续观察）
+      - 本地检查通过率：62% → 65%
+      - 以担心开头：0 → 3/40
+  - 上线后检验：原创里自报职业或身份的比例低于 5%；6 词重复引起的失败不高于第一小时（7.2%）；总失败率不变差；回复的 Jev 通过率不低于上线前。
+- 2026-10-24 16:0x **green — D99/D100 合并：三类证据接进 Blue（已确认隐藏、文案识别、文风分组），未部署，随第四十一窗口上线**（会话「Blue 页改为账号为单位」`19af4a8e`，协调 `local_968fe272` 批准了方案 1–8）。
+  - 用户原话：「之后我们把这个融合，被隐藏的帖子账号和文案识别的结果都将被blue使用」。
+  - `blue_reports.py`：
+    - 证据家族：`shared_text` 改名为 `writing`，同文三条规则都归进去。新增 `style_group`（1.0）和 `style_group_hidden`（1.6），后者要求组内除本号外另有 ≥2 个账号有已确认隐藏帖。同一个家族里只算最强的一条；单靠这个家族，`SINGLE_FAMILY_CAP` 会把 p 压在阈值以下。
+    - `_style()`：
+      - 文风数据来自 `style_groups.account_evidence`，只读内存；本号有没有隐藏帖，由 `risk_assessment.account_risk` 判断。
+      - 对有文风组的作者，跑一次市民代理 `agent_targeting.citizen_accounts`。判为市民的账号，文风证据只显示、不计分（`style_group_info`）。代理出错时，同样当作市民处理。
+      - 实测 800 个作者，约 0.4 秒 CPU、0.8 秒墙钟（首次 4.6 秒）。
+    - 可能是队友（`possible_teammate`）的帖子不占 50 条的名额，排在后面，最多 40 条，只用来展示。候选帖新增 `style_group`、`possible_teammate`、`linked_to_ours` 三个字段。
+    - `daily_plan` 和 `_reported`：同文簇和文风组（S 前缀）各算各的「当天 5 次全额」，任意一个满了就跳过，原因写 `style_group_daily_cap`；可能是队友的写 `possible_teammate`，永远不进计划。
+  - `blue_view.py`：
+    - `copy_evidence = {...copy_patterns.account_evidence, 'style': style_groups.account_evidence}`；我方角色、`team_accounts` 和已认证账号一律置为 None。
+    - 可能是队友的账号先从候选、计划和账号行里剔除，单独放进 `excluded_teammates`，附 `teammate_note`，资格里写 `possible_teammate`。
+    - 账号举报资格也按文风组计名额。
+    - 排序：Yes 方放最后；然后是有事可做的；再按本号已确认隐藏数、组内被隐藏的账号数、动作数排。
+    - 英文举报说明加了文风原因。
+  - `blue_submit.py`：举报记录带上 `style_group`。
+  - `copy_patterns.py`（子 agent 的文件，只用 Edit 小改）：新增 `cache_key()`，内部用 `db.resolve_database_target`，缓存的读写全部经过它。不管传进来的是 Path、字符串还是 URL，都落在同一个缓存里，有测试覆盖。
+  - 共享文件 `server.py`：在生命周期里接上 `StyleGroupMonitor(db).start()` / `stop()`。首轮在启动 10 分钟后，之后每 60 分钟一轮，在子进程里算。
+  - 前端 `BlueCandidates.tsx`：
+    - 文案和文风分两行显示：一行是模板帖占比、共用短语账号数、照抄事实条数，加前 3 条短语（标出 NPC 也用的）；另一行是「文风：同组 N 人（其中被隐藏 M 个）」，加 1–2 条代表帖。
+    - `linked_to_ours>0` 的账号显示黄色提示「与我方 N 个账号文风相近，举报前请核对」。
+    - 可能是队友的账号放在折叠栏「可能是未登记的队友，已剔除 · N」里，卡片上写原因，没有任何按钮。
+  - 测试：
+    - 新增 `tests/test_blue_merge.py`（14 个）；
+    - Blue、风险、hidden_posts、spa、pipeline、clusters 相关共 120 个通过，copy_patterns 和 style_groups 26 个通过；
+    - 前端 BlueCandidates 33 个通过（新增 3 个，重写 1 个）；
+    - tsc 通过。
+  - 没有用线上数据跑：文风和文案的结果只在后端进程的内存里，上线并跑完首轮后（文风约 10 分钟、文案约 30 分钟）才能在 /blue 上看到。
+- 2026-10-24 15:4x **green — 事实每小时上限也计入还没归因的稿子，未部署**（会话「文案识别问题」`9d62c832`，协调 `local_968fe272` 批准）。
+  - 原因（上线后第一小时只读复测）：`post_attribution` 大约每 10 分钟成批写入一次（03:11:46、03:21:51、03:31:53），上限只读这张表，看不到两次写入之间发出的帖子。03:21–03:31 UTC 之间 `wet_season` 被用了 11 次，这一小时一共 14 次，上限是 3 次。
+  - 改动：
+    - `fact_bank.usage` 多返回第 4 项：已经归因的帖子和稿子，形式是 ('post', post_id) 和 ('draft', draft_id)。facts_for 只取前 3 项，不受影响。
+    - 新增 `agent_pipeline.with_unattributed`：把 agent store 里还没归因的稿子加进用量，状态限 pending、sending、uncertain、published。
+      - 已发布的稿子按发布时间计；
+      - 还在发送中的稿子算作这一小时，但创建超过一小时的不计；
+      - post_id 或 draft_id 已经出现在 post_attribution 里的跳过，所以同一条不会算两次。
+    - `offered_facts` 新增参数 `drafts`。`agent_control._staged_decision` 把 `data['drafts']` 传进去，生成时读的是 `store.read()` 的全部草稿。
+  - 测试：
+    - `tests/test_fact_bank.py`：
+      - 按 draft_id 和 post_id 都不会重复计数；
+      - 发送中的稿子算这一小时，卡住超过一小时的不算；
+      - discarded 状态和 like 不算；
+      - 6 小时窗口和 1 小时窗口分开计；
+      - 用 offered_facts 实测：只有 store 里有、还没归因的那次使用也会让事实超限。
+    - `tests/test_agent_pipeline.py`：控制器调用时确实把 drafts 传了进去。
+    - 相关 318 个测试通过。
+- 2026-10-24 15:35 **green — 修复 PG 备份恢复到空 PG 库失败的两处老问题，未部署，随第四十一窗口上线**（会话 `0a84fe37`，协调 `local_968fe272` 批准）。
+  - 改动：只改了 `ctn_data/migrate_postgres.py`，没碰 `server.py`、Blue、`agent_pipeline.py`。
+    - (a) 新增 `DERIVED_TABLES = {'counter_sampling'}`。备份里带着 SQLite 自己的这张派生表时，`migrate()` 不再拒绝，也不复制它；目标库的触发器会在复制 posts / 快照 / 尝试记录时把它重建出来。从恢复端修，已经做好的旧备份也能直接恢复。
+    - (b) 空库检查放行 `INITIAL_META_KEYS`，即 `created_at`、`mode`、`schema_fingerprint`，这三个键是 `initialize()` 自己写的。去掉了多余的 `count > 2`（meta 的 key 是主键，所以这个判断本来就多余）。恢复后的 meta 仍然原样来自备份。
+  - 新增 `tests/verify_backup_restore_postgres.py`，只用随机临时库，跑完会删掉：
+    - 在源库灌入数据：帖子、快照、尝试记录、收据、API 日志、排行榜、meta；
+    - 用 `backup_postgres` 备份，再 `migrate` 到一个**从没初始化过的空库**。
+  - 结果：
+    - 一次成功，41 张表的哈希全部和源库一致；
+    - 派生表 `counter_sampling` 重建后和源库逐行一致（3,000 行）；
+    - 自增序列都接着最大 id 往后走（api_call_logs、counter_snapshots、leaderboard_snapshots、raw_records）；
+    - 新进程执行 `initialize` 正常；
+    - 结果在 `reports/generated/backup-restore-postgres.json`。
+  - 对照实验：
+    - 改之前，同一脚本报「unrecognized tables: counter_sampling」；
+    - 只修 (a)、把 meta 检查换回原来的两个键，报「Target database is not empty」。
+    - 所以两处都要修。
+  - 测试：备份 / 迁移相关的 8 个模块共 86 个通过（其中 16 个没有 DSN 时会跳过）；在临时库上补跑 PG 合约测试 23 个，全部通过，没有跳过。
+- 2026-10-24 14:44 **green — 排行榜
+- 2026-10-24 14:44 **green — 排行榜 `leaderboard_snapshots`（D104）上线前 PG 验证：全部通过**（会话 `0a84fe37`，协调 `local_968fe272` 要求的。只用随机临时库，事后都删掉了，没碰线上库，也没改代码）。
+  - ① 从 W39（`c709fee`）升级：
+    - 做法：用 W39 的代码包初始化临时库，灌入 5 万帖子和 5 万计数快照，再用当前工作区的代码执行 `initialize`。
+    - 耗时 0.64 秒，没有报错。
+    - 建表：
+      - `id` 是 `bigint GENERATED BY DEFAULT AS IDENTITY`；
+      - `score` 是 double precision；
+      - 有 `UNIQUE (competition_id, observed_at, team)` 约束和 `idx_leaderboard_team_time` 索引；
+      - fingerprint 已更新。
+    - 新增的 DDL 只是建一张空表加一个索引。线上初始化的其余部分（每次都跑的派生语句）和第三十七到三十九窗口一样。
+  - ② 用 `tests/test_leaderboard.py` 里的 BOARD 样例 HTML：
+    - `leaderboard.capture` 存了两次快照。回执是 `{parser: server, teams: 3}`，id 从 1 到 6 连续。
+    - 三行解析结果：placeholder 44128 / C-- 43300 / Agent Zero 5 4370，team_id 为 9 / 空 / 46。
+    - 同一时间点重发一次，会整组替换，序列继续往后数（id 4–9）。
+    - 同一快照里插入重复的队，被 UNIQUE 挡住（IntegrityError）。
+    - 单条 INSERT 能拿到 lastrowid（`IDENTITY_TABLES` 加的 RETURNING 生效）。
+    - `browser_capture` 的 kind=leaderboard 分支：第一次接收、重复接收都是幂等的，competition 3 被拒且不重试，收据里 teams=3。
+  - ③ 备份核对：
+    - `backup_postgres` 按第一列排序算的哈希能通过（9 行，sha256 `b64848d6…`）。
+    - 把备份 `migrate` 到第二个临时库，校验通过，这张表的哈希一致。
+    - 恢复后新插入一行，id 是最大值加一（`setval` 覆盖了这张表）。
+  - ④ 原先跳过的 PG 合约测试：`test_postgres` 和 `test_postgres_streaming` 在临时库上跑了 23 个，全部通过，没有跳过。
+    - 现有验证脚本也都通过：`verify_checkpoint_index_postgres`、`verify_collection_reconnect_postgres`、`verify_storage_remediation_postgres`。
+    - `test_leaderboard` 18 个测试通过。
+  - **两个和 D104 无关的老问题**：都会让「从 PG 备份恢复到 PG」第一次就失败，建议另外修。
+    1. `backup_postgres` 生成的 SQLite 备份里带着派生表 `counter_sampling`（SQLite 的 initialize 会建这张表，从 10-22 的基线 `78386ff` 起就这样）。`migrate()` 遇到不认识的表会拒绝：「Source has unrecognized tables: counter_sampling」。
+    2. `initialize()` 会往 meta 写 `schema_fingerprint`，`migrate()` 的空库检查只放行 `created_at` / `mode` 两个键，所以新建的空库也会被判为「Target database is not empty」。`tests/run_postgres_verification.py` 是先删掉 meta 才绕过去的。
+    - 这次验证时，两处都用临时副本绕开了（删掉副本里的派生表、清掉 meta）。
+- 2026-10-24 14:4x **green — 文风分组模块 `style_groups.py`（d1L，numpy+scipy 版），未接线、未部署**（协调的子 agent；方法按 `reports/generated/style-detection-research-20261024.md`，用户选定 d1L 和装 numpy+scipy 的版本）。只用来识别别队的协同账号（D47）。
+  - 文件：只新增 `ctn_data/style_groups.py`、`tests/test_style_groups.py`。没改任何已有文件，也没有已有模块 import 它；接进 Blue「今日建议」和启动后台线程留给合并步骤。没建表、没写库、没启动后端、没提交、没碰计划任务。
+  - 方法：近 48 小时 ≥5 条非转发文本的账号，每号最近 40 条；字符 3–5 gram，固定整数哈希（FNV-1a + splitmix64，跨进程稳定）到 2²¹ 维，次线性 TF×IDF；减 B 份 NPC 质心后求余弦，再做局部 NPC 对比 s′=s−max(m_u,m_v)（k=3）；θ = C 份校准 NPC 账号对 s′ 的最大值；互为前 20 近邻 + 核心点 ≥3 条边 + 组 ≥3 人。NPC 标签 = 赛前账号（id ≤2343）∪ `npc_calibration.certain_npcs`，去掉我方和 team_accounts，按账号 id 的固定种子哈希分 B/C 两半。
+  - 输出：已认证、我方角色（meta `agent_control_v1:agents`）、team_accounts、已标 NPC 的账号留在计算里但不列出。**安全规则**：组里有我方角色或 team_accounts 时，组里其他账号一律 `possible_teammate=True`，`teammate_note`「与我方文风同组，可能是未登记的队友」；不改 team_accounts。
+  - 接口：`compute(conn, now=None)` → `(view, index)`；`account_evidence(account_ids)` 只读缓存，返回 `style_group / group_size / group_listed / group_hidden_accounts / peers[≤10] / examples[≤2 {post_id, account_id, username, excerpt}] / possible_teammate / teammate_note / linked_to_ours`，不带 `template_share`、`phrases`（那两项来自 `copy_patterns.account_evidence`），结果超过 180 分钟返回 {}；`cached()` 给页面用；`StyleGroupMonitor(db_path)` 每 60 分钟一轮（首轮 10 分钟后，和 copy_patterns 错开），默认在低优先级子进程里算、BLAS 2 线程，子进程每轮新连接、读完就关；出错记日志并保留上一轮结果。
+  - 测试：`tests/test_style_groups.py` 14 个通过（合成数据：分组、θ=校准对最大值、排除规则、possible_teammate、account_evidence 结构、缓存过期、出错保留旧结果、每轮新连接并在计算前关闭、线程启停、子进程一轮）。
+  - 线上只读结果（`initialize` 换成抛错函数、会话强制 `default_transaction_read_only=on`、在 `BEGIN READ ONLY` 里读；窗口 10-22 03:35 至 10-24 03:35 UTC）：3,815 个账号，θ=0.107；52 组、1,937 人，最大组 211；列出 51 组、1,897 人，其中 841 人有已确认隐藏帖，37 组含 ≥3 个隐藏账号。B/C 份 NPC 入组 0；另跑一次留出三分之一 NPC 标签：留出 287 个，入组 0。我方 29 个角色自成一组（不列出）。2 号 KingstoniaHerald 这轮没进组（进了也会被排除）。
+  - **possible_teammate 29 个**（研究里只有 3925、7083）：队友 11 个号所在的组这次是 40 人，除 3925 `echovector_02`、7083 `James Harden`，还并进了 sidequest01–03（3597、9570、9572）和一批 24 个 `名字_姓氏##` 账号（4197–4907，如 4449 sadie_warren16）。研究的 d1L（不截 40 条）里这三批是分开的组；其中 17 个和至少 1 个队友号直接超过阈值（3925、7083、4445 各 9 个）。按规则全部标记、不当举报目标；要不要核实登记，请协调定。
+  - CPU：每轮约 30 秒 CPU（读库 1.4 秒 CPU / 3.5 秒墙钟，计算 27 秒 CPU / 24 秒墙钟，numpy/scipy 导入 0.8 秒），低于报告估计的 55 秒；子进程峰值内存约 690 MB，退出即释放。每小时一轮约占 1 个核的 0.8%。
+- 2026-10-24 14:2x **green — 风险页「文案识别」，未部署，等协调重载**（协调的子 agent；用户原话：「在我的系统中增加文案识别放在风险里面，识别所有帖子的文案」）。只读，只做显示和风险提示，没接进生成或写作，也不给改写建议（D47）。
+  - 文件：新增 `ctn_data/copy_patterns.py`、`tests/test_copy_patterns.py`、`frontend/src/pages/CopyPatterns.tsx`。只用 Edit 改了：`risk_assessment.py`（共 7 行：import；RiskMonitor 带一个 `CopyPatternMonitor`，随 start/stop 启停；`overview()` 多一个 `copy_patterns` 键）、`RiskAssessment.tsx`（2 行）、`RiskAssessment.test.tsx`、`tests/test_risk_assessment.py`。没碰 `server.py`、`db.py`（不建新表）、Blue 的文件和 `agent_writing.py`。
+  - 内容（近 48 小时全部帖子，分我方 / 队友 / 别队 / 已校准 NPC 四组）：
+    - 共用短语：归一化后连续 6 个词，≥3 个账号用过，显示总次数、账号数、四组占比、示例、成员。同一批账号、前后相连的短语合成一条。账号按短语分组，不做传递合并；列表里和上面某条重叠 4 个词的算它的「相近片段」，只计数。
+    - 覆盖率：帖子里落在共用短语里的词占全文的比例。
+    - 开头前 4 个词、句子和分句开头前 3 个词的分布。
+    - 照抄事实：连续 ≥8 个词和事实库原文相同，比对在用、已取代、已退役的事实。
+    - 账号层面：每个账号带共用短语的帖子占比。
+    - 我方：角色表、模板帖列表（隐藏的排前面），以及按「带不带 / 覆盖率 / 照抄事实 / 开头」四种分法对照 `post_visibility` 的隐藏率。
+    - 「已校准 NPC」= `npc_calibration.certain_npcs` 加上 id ≤ 2343 的账号。
+  - 运行方式：RiskMonitor 里的线程每 30 分钟（后端启动 3 分钟后第一轮）起一个子进程 `python -m ctn_data.copy_patterns`，低于正常优先级，数据库地址走 stdin，不出现在命令行。子进程每轮新开连接，读完就关。结果（约 180 KB）和账号索引放在后端内存，接口只读缓存，出错保留上一轮结果。
+    - 不放在后端进程里算的原因：实测进程内算完后有 200–300 MB 一直不还给系统，而且会占 GIL。
+  - CPU 和内存实测（线上只读，140,460 条帖子）：
+    - 子进程每轮 27–34 秒 CPU（Agent 正在运行；较空闲时约 20 秒），峰值约 450 MB，退出即释放。
+    - 后端线程每轮约 0.2 秒 CPU（解析 JSON），常驻缓存约 30 MB（测试进程三轮后工作集稳定在 57 MB）。
+    - 对比：旧 `blue_template_network.patch` 在进程内每 30 分钟 29 秒。
+  - 给 Blue 的函数，只读缓存：`copy_patterns.account_evidence(db_path, account_ids, *, phrases=5, peers=10) -> {account_id: {template_share, phrases:[{phrase, accounts, npc_free, posts}], peers:[account_id, …], copied_facts, coverage, fact_ids, peer_phrases, posts, shared_posts, group, username, generated_at}}`。peers 只算 NPC 不用、≤25 个账号用的短语，每个短语单独算。
+  - 测试：
+    - 后端：`test_copy_patterns` 12 个、`test_risk_assessment` 14 个、`test_hidden_posts` 6 个，共 32 个通过；`test_server`、`test_spa_routes`、`test_nav_status`、`test_account_identity`、`test_auth` 共 38 个通过。
+    - 前端：vitest `RiskAssessment.test.tsx` 7 个通过，tsc 通过。
+    - 没有启动后端，没有在浏览器里看页面。
+  - 线上只读结果（窗口截至 03:15Z，140,460 条帖子、8,114 个账号）：
+    - 带共用短语的帖子：全平台 65%，我方 99.2%（1,654/1,668）。覆盖率：我方 52%、别队 25%、队友 16%、已校准 NPC 13%。我方 1,654 条带共用短语的帖子，每一条都至少有一个已校准 NPC 不用的短语。
+    - 前 10 条共用短语（账号数，括号里是我方账号数）：
+      1. health workers and high risk people 214（19）
+      2. everyone has had a fair chance 193（12）
+      3. what i keep coming back to 184（2）
+      4. what would you need to see 155（1）
+      5. a fair chance at the free 152（29）
+      6. about 150 extra respiratory patients before 136（22）
+      7. every eligible kingstonian has had a 130（30，833 条帖子）
+      8. 30 icu beds and 40 ventilators 123（21）
+      9. 30 icu beds for the whole 122（2）
+      10. respiratory patients before ordinary care suffers 121（20）
+    - 句式：「the government says」全平台 668 条，我方占 548 条；「im voting yes」3,245 条里我方 410 条。我方最常用的开头：「the worry going round」64 条、「the question i keep」53 条。
+    - 照抄事实：全平台 1,823 条帖子照抄了 114 条事实，其中我方 852 条，占我方帖子的 51%。`phased_after_access` 被抄 596 次，我方 512 次。
+    - 我方隐藏率（48 小时 1,668 条，已确认隐藏 20 条）：
+      - 带模板 19/1,654 = 1.15%，不带 1/14；
+      - 按覆盖率：<25% 3.1%（4/128），25–50% 0.9%，50–75% 1.2%，≥75% 0.8%；
+      - 照抄事实 0.8%，不照抄 1.6%。
+      - 我方几乎每条都带模板，没有对照组，隐藏数也少，看不出「带模板」和「被隐藏」有关。
+  - 已知限制：
+    - 「6 个词 + 3 个账号」门槛低。全平台 65% 的帖子都会命中，很多是大家都引用的同一批官方数字和新闻原句，不等于模板。所以另给了覆盖率和「NPC 不用 / NPC 也用」标记，但没有判断哪些是模板、哪些是公共说法。
+    - 同一句话会拆成几条（例如 every eligible kingstonian has had a、a fair chance at the free），账号数各算各的。
+    - 已校准 NPC 只有官方证实的 10 个，加上 id ≤ 2343 的 2,064 个；「别队」里还有没校准到的 NPC。
+    - 隐藏率只看 48 小时内的帖子，样本小。
+    - 后端重启后缓存是空的，要等第一轮算完（约 3.5 分钟），在这之前页面显示「后台每 30 分钟算一次…」。
+- 2026-10-24 14:2x **green — Blue 按账号模式上线后的两处修改，未部署**（会话「Blue 页改为账号为单位」`19af4a8e`；协调 `local_968fe272` 批准，并转达用户原话：「给，只分开显示」）。
+  - 起因：上线后在线上库只读核对，可举报账号 6 个，其中 5 个是 Yes 方；另有 10642 已确认隐藏 3 条。
+  - `blue_view.py`：已确认隐藏 ≥3 条的账号（`SUSPENSION_HIDDEN`），账号举报资格的 `missing` 加上 `suspension_line`，不再给账号举报按钮。
+    - 原因：隐藏满 3 条会自动封号，再举报账号拿不到分。
+    - 平台不公开封号状态：已封号的 Maya、Ethan、Peg，资料页仍然返回 200，帖子也还在列表里，所以只按已确认隐藏数判断，没有加额外的平台请求。
+  - `BlueCandidates.tsx`：
+    - 卡片上写明「已到 3 条封号线，可能已被封」；
+    - 「可举报账号」指标和「今日建议」的账号数，都按「No 方 / 立场不明或混合 / Yes 方（我方）」分开计数；
+    - Yes 方账号照样保留「举报这个账号」按钮，「Yes 方（我方）」标签也保留。
+  - 测试：
+    - 后端新增 1 个，Blue 相关 71 个通过；
+    - 前端新增 2 个，BlueCandidates 31 个通过；
+    - 「历史举报记录」那个测试在负载高时偶尔超过默认的 1 秒等待，单独把这一步的等待放宽到 3 秒，连跑 3 次都通过；
+    - tsc 通过。
+- 2026-10-24 14:15 **green — 排行榜同步（D104），未部署，等协调重载**（协调 `local_968fe272` 的子 agent）。没有提交、没有重载、没启动后端、没碰 CTN-AutoStart 和凭据。
+  - 扩展 1.4.0（`browser-extension/`）：
+    - `page.js`：新增 `leaderboard()`，在本队标签页里同源只读 GET `/user/competitions/2`（`credentials:'same-origin'`、`cache:'no-store'`、20 秒超时），用 DOMParser 找表头含 Team 和 Score 的那张表，发 `{kind:'leaderboard',observed_at,data:{competition_id:2,table_html（只这张表，≤300 KB）,rows:[{rank,team,score}]（粗解析，解析不出给空数组）}}`。
+    - 调度在 `background.js`：每次 30 秒的 tick 里，到点就让本队页面读一次，间隔 10–15 分钟随机；页面没在采集或有未确认记录时 1 分钟后再问。
+    - 401/403/429、跳到登录页、其他非 200：沿用现有暂停规则（5 分钟到 7 天，尊重 Retry-After），但只暂停排行榜（`board.pause_until`），**本队总分和流水照常采集**。找不到表、表超过 300 KB：不发记录、不暂停，下一轮再读。
+    - `background.js` capture 校验放开 `leaderboard`（competition_id 必须是 2、只能有这三个字段、table_html ≤300 KB、rows 是 ≤500 的数组、要有 observed_at）；`migratePortalOnly` 保留排行榜记录。`content.js` 转发，排行榜记录不会把本队状态改成「本队数据已缓存」。`popup.js` 多一行「排行榜」状态。
+    - `manifest.json`：只改版本和描述；host_permissions 不用改（同源 fetch）。
+  - 后端：
+    - 新模块 `ctn_data/leaderboard.py`：用标准库 `html.parser` 解析表格（列顺序可变、千分位逗号和窄空格、`=2` / `T2` / 空白的并列名次、没有名次列时按分数算并列名次、colspan、嵌套表、链接里的队伍 ID）；存快照；查询最新排名、每队 1/6/24 小时变化和每小时速度（基线要在 N 到 1.5N 小时前，否则为空；速度优先 6 小时）、名次 24 小时变化、我方与上一名和第 1 名的差距及追上时间、指定队伍的曲线。我方按队名「Agent Zero」或本机绑定的队伍 ID 标出。表格解析失败时用扩展的粗解析结果；两边都读不出时记录照样接收，样本存进 `meta.leaderboard_parse_failure`，页面上会提示。
+    - `db.py` SCHEMA：新表 `leaderboard_snapshots(id, observed_at, competition_id, rank, team, score, team_id)`，`UNIQUE(competition_id,observed_at,team)` 加 `(competition_id,team,observed_at)` 索引。id 放第一列，是因为 PG 备份按第一列排序后核对哈希，第一列必须唯一。SCHEMA_VERSION 没改（PG 按指纹重跑 IF NOT EXISTS）。`postgres.py`：`IDENTITY_TABLES` 加这张表（迁移时重设自增序列）。
+    - `browser_capture.py`：新增 `kind=='leaderboard'` 分支，回执里记下队伍数和解析方式。
+    - `server.py`：`GET /api/leaderboard?teams=<换行分隔，最多 12 队>&hours=<1–168，默认 48>`，排名缓存 60 秒，曲线按队伍组合缓存 60 秒；`SPA_PATHS` 加 `analysis/leaderboard`。
+  - 前端：新页面 `pages/Leaderboard.tsx`（+ `leaderboard.css`）：我方名次、分数、速度、与上一名和第 1 名的差距；分数曲线（默认前 5 名加我方，最多 8 队，下拉框或表格勾选，24 小时 / 48 小时 / 7 天，「分数 / 窗口内增长」切换，一条 y 轴，颜色跟着队伍走）；当前排名表（名次和 24 小时名次变化、队名、分数、1h/6h/24h 变化、每小时速度，可排序，我方高亮）；超过 30 分钟没更新或解析失败时有提示。`routes.tsx` 加路由，`navConfig.ts` 在「③分析」组加「排行榜」，`routes.test.tsx` 加 mock，`AppShell.test.tsx` 侧边栏链接数 26→27、31→32。
+  - 测试：后端 `test_leaderboard` 18 个（解析器、入库、变化量、曲线、缓存、经 browser_capture 入库、接口）+ `test_spa_routes`、browser capture、auth、postgres（无隔离 PG，16 个跳过）、备份相关共 102 个通过；前端 vitest（Leaderboard、routes、nav、AccountClusters）106 个通过，tsc 通过；扩展新测试 `tests/browser-extension-leaderboard.test.cjs` 12 个和 background 20 个通过。`tests/browser-extension.test.cjs` 里原来就有 5 个失败（还在断言版本 1.3.3，DOMParser 假对象不支持活动表），和这次无关，没改。
+  - **上线后用户要做的**：在 chrome://extensions 里点「CTN 本队积分同步」的刷新按钮，让 1.4.0 生效；保持本队页面标签和门户登录，10–15 分钟内出现第一份快照，页面在「分析 → 排行榜」（`/analysis/leaderboard`）。
+- 2026-10-24 13:16 **green — 检查意见能识别否定了，未部署，等协调重载**（会话「生成失败率修复」，协调 `local_968fe272` 派的任务，问题是「文案识别问题」在 A/B 里发现的）。
+  - 问题：`_PROMOTED_NOTE` 只要意见里出现「conced」「unanswered」就算不通过，所以「without conceding」「doesn't concede」「leaves nothing unanswered」这类正面评价也被判成不通过。
+  - 改动（`agent_pipeline.py`，只用 Edit）：
+    - 新增 `promoted_note(note)`，`check_issues` 改为用它。每个匹配点看同一分句里前面最多 5 个词。
+    - 分句在 `.,;:!?()—` 以及 but / yet / though / which / so 等词处断开，所以前一分句里的 not 不会把后一句的让步抵消掉。
+    - 这几个词里有 without / not / never / nothing / none / nor / cannot / avoid / rather than / instead of / n't，或者匹配点后面紧跟着 nothing / none / no ground，就算正面评价，不算不通过。
+    - 小写的 no 也算否定，但「no side / no case / No-leaning」这类指公投 No 方的说法不算；引号里引用的原文不参与判断。
+    - `concedes_no` 等结构化字段的判定不变，仍然优先。
+  - 为了不放宽检查，正则补了两种以前只是碰巧被拦下的说法：
+    - `not (actually|really|fully|directly) answered|addressed|resolved`；
+    - `restates the No side`。
+  - 测试：
+    - `test_agent_pipeline` 新增 9 条正面否定句（通过）、11 条真让步或真漏答（不通过，包括引号里有 can't 的、前一分句里有 not 的、「no case」的），以及一条一半夸、一半真漏答的混合意见（不通过），并核对结构化 `concedes_no` 仍然优先。
+    - 相关 6 个模块共 107 个测试通过，py_compile 通过。
+  - 回放：
+    - D90 以来失败消息里命中旧规则的意见共 53 条：25 条现在算正面评价，28 条仍然不通过。
+    - 两条被放过的只是建议，请协调看一眼是否同意：「may still want the venue-list concern addressed」和「does not explain that the list is set by regulation」。
+    - 185 次「两次未通过」的失败里，约 23 次（12%）只是被这类正面评价拦下的。这是估计：失败消息被截到 300 字，可能还有没看到的意见。
+- 2026-10-24 13:xx **green — 原创帖和回复的写作结构（D97），未部署，A/B 结果等用户看过并同意**（会话「文案识别问题」`9d62c832`，协调 `local_968fe272` 派的任务）。
+  - 原因：今天被隐藏的 6 条帖子骨架相同：「X is the worry / People ask…」→「The government says … every eligible Kingstonian…」→ 两到三条事实 → 结尾 @公众人物。这套骨架是旧模板直接给出来的：
+    - 原创帖第 1 步要求第一句先点出流传的说法或问题；
+    - 第 2 步要求用一到两条事实，并写明是谁说的；
+    - 回复固定为「表示理解对方担心的事 → 一条事实（最多两条） → 一句话说明为什么这就能回答对方」。
+  - 改动：
+    - `agent_writing.py`
+      - **原创帖**：按人设写，工作、住在哪、说话方式决定从哪里切入。每条帖子按权重抽两种写法，让模型挑适合自己的一种：
+        - 从自己的工作或社区说起；
+        - 只讲一个点；
+        - 向犹豫的人提一个真问题，再给出自己的回答；
+        - 对 FACTS 里的一条新闻做反应。只有某条事实带链接时才会抽到这种。
+      - 原创帖只用一条事实，其余的不用。只在说明来源能让这条事实更有分量时才说是谁说的，不写成「The government says」。不以「… is the worry / People ask / The line going round」开头。@ 公众人物要写进自己的句子里。结尾、话题标签、不编造经历这些规则照旧。长度 250–480 字符，只讲一个点的可以更短。
+      - **回复**：先读 TARGET，回应对方具体写了什么，不复述对方的担心。每条按权重抽两种回应方式，让模型挑一种：
+        - 直接回答对方问的或说的事；
+        - 接住对方帖子里的一个具体细节，从自己的工作或社区出发回应；
+        - 从对方自己说的处境出发，讲这次投票对处在这个位置的人意味着什么。
+      - 回复用一条能回答对方的事实；只有对方问到的事 FACTS 里没有时才不用。不写成「The government says」，也不自己补「规则会怎么执行」之类的说法。长度 150–320 字符。结尾的抽法、禁用的开头、不重复 No 方的说法，这些规则照旧。
+    - `agent_pipeline.write_messages` 改了两处：
+      - 有带链接的事实时，传 `news=True`；
+      - MENTION_FIGURE 那句改为「写进自己的句子，不要写成 "@name, do this" 式的结尾」。
+    - 测试：`tests/test_agent_writing.py` 新增 4 个，覆盖两种写法互不相同、没有新闻事实时不抽新闻写法、去掉旧骨架、`write_messages` 只在事实带链接时给新闻写法；`tests/test_stock_lines.py` 把 `REPLY_OPENINGS` 改成 `REPLY_MOVES`。相关 182 个测试通过，py_compile 通过。
+  - D47 边界：只按内容质量来写，没有拿平台或我们自己的识别规则（`style_score`、heavy 等）测帖子，也没有做「跨账号改得不像」的改写。A/B 指标只看骨架、套话和检查通过率。
+  - A/B 做法（离线，只读库，脚本在本会话 scratchpad `ab/ab_structure.py`）：
+    - 取 10-22 13:00Z 以后 500 条已发布的 staged 草稿，随机抽 30 条回复、10 条原创，覆盖 18 个角色。
+    - 每条草稿沿用当时的角色、决定、选中的事实、目标和记忆；旧模板用 HEAD `c0d6a4a`，新模板用工作区。
+    - 写作走角色自己的 OpenRouter 连接（deepseek-v4.1-flash，morph→relace），用线上的写作参数；每条在新旧模板下各写两次，每次都用 Jev 检查。原创帖线上不走 Jev，这里也用 Jev 判一下作参照。
+    - 一共跑了 3 轮：第 1 轮新模板带出「You're right that…」开头，原创帖也还在堆事实，改了回复写法和事实条数；第 2 轮不用事实的回复 Jev 失败多（5/13），改成默认用一条事实。下面是**最终模板**的数字：原创帖取第 2、3 轮，新旧各 40 条；回复取第 3 轮，新旧各 60 条。
+  - 结果（旧 → 新）：
+    - **原创帖（40 条）**
+      - 带「The government says」：52% → 20%
+      - 以顾虑开头（「… is the worry / People ask / question going round」）：55% → 10%
+      - 今天被隐藏那几条的骨架（顾虑开头 + 政府说 + 两条以上事实）：22% → 0
+      - 用两条以上事实（估算）：78% → 12%
+      - 同一轮里两条不同草稿开头三个词相同：4/40 → 0/40
+      - Jev 通过：70% → 75%
+      - 本地检查通过：90% → 82%（「重复自己最近帖子」从 1 条变成 4 条；线上这种情况会退回重写一次）
+      - 长度中位数：471 → 427
+    - **回复（60 条）**
+      - 带「The government says」：30% → 10%
+      - 以顾虑开头：7% → 2%
+      - Jev 通过：78% → 85%（两次分别是 90% 和 80%）
+      - 本地检查通过：60% → 52%，主要是照抄事实的原文（19 次 → 27 次，线上会退回重写，重写提示已经带上照抄的片段）
+      - 长度中位数：312 → 299
+      - 用两条以上事实：55% → 45%，模型还是常用两条
+    - 对照：同一批草稿当时线上发出的原文里，原创帖带「government says」50%、以顾虑开头 60%；回复带「government says」37%。
+  - 没解决、需要另外决定的：
+    - **「every eligible Kingstonian」**：只要选中了 `phased_after_access`，新模板下仍有 67%（原创帖）和 69%（回复）照抄这句；旧模板是 92% 和 85%。原因是这句写在事实原文里，只有 26 个字符，照抄检查（50 字符）抓不到。按用户在 D95 的决定没改线上事实库，靠已提交的硬上限把它压到每小时不超过 3 次。
+    - **@公众人物**：「@X, thank you / keep that commitment」这种写法仍有约 55%（旧 65%）。根源是 `agent_targeting.PUBLIC_FIGURES[...]['how']` 写好的称呼方式（例如「ask the government to keep the commitments」），那是 B 的文件，我没改。要改的话，把 `how` 写成要表达的意思，不给现成的话。
+    - 原创帖的「从自己工作说起」会重复角色自己常用的介绍（例如「I book ferries」），本地检查会退回重写一次。
+  - 上线后的检验（和 D95 一起看）：
+    - 我方原创帖以顾虑开头的比例低于 15%；
+    - 带「the government says」的低于 20%；
+    - 带「every eligible Kingstonian」的低于 10%；
+    - 回复的 Jev 通过率不低于上线前；
+    - 生成失败率不变差；
+    - 隐藏帖数持续观察（风险页）。
+  - **补充（14:xx，用户看过 A/B 后的选择，原话：「修完第 2、3 点再上（推荐）」「改列表写法（推荐）」「靠每小时上限（推荐）」）**：
+    - 改动：
+      - `agent_targeting.PUBLIC_FIGURES` 的 `how`（B 的文件，只用 Edit）：改成只写这个人负责什么，不再写现成要说的话。原来是「thank her…」「answer her argument…」「ask the government to keep the commitments…」，现在是：
+        - Singh：医生一方支持 Yes 的理由、医院人手和容量、疫苗的医学方面；
+        - Castillo：旅游业和商户、No 方的理由；
+        - Hawthorne：Yes 通过后负责推出准入规则的政府首脑。
+      - `agent_pipeline.write_messages`：MENTION_FIGURE 那句改为「`how` 是他们负责的事，写进自己的句子，不写成 "@name, do this" 式的收尾」。
+      - 回复模板加一句：接住对方的细节时，不沿用 No 方的说法，用自己的话回应。
+      - **原创帖的检查要看到被 @ 的人**：`check_messages` 新增 `figure` 参数，原创帖的 payload 里带上 `MENTIONED_FIGURE`（who/how）。CHECK_SYSTEM 也注明，涉及这个人身份和职责的话不算 unsupported。`agent_control._staged_decision` 改了一行，把 `decision['mention_figure']` 传进去。原因：A/B 里写作者按 who/how 写出「the union @DrAmaraSingh leads」，检查那边看不到这些信息，判成 unsupported。
+      - 前端 `Strategy.tsx`：这一列的标题从「怎么提」改成「负责什么」。需要重新构建前端。
+      - 测试：
+        - `test_agent_targeting`：`how` 里不出现 thank / ask / keep / answer / commitment；
+        - `test_agent_pipeline`：系统提示里有新的 `how` 说明；检查能看到被 @ 的人，回复不带它，前缀不变；控制器层面检查的 payload 带上它；
+        - `test_agent_writing`：回复模板里有「不沿用 No 方的说法」。
+      - 相关后端 23 个模块共 314 个测试通过；前端 StagePages 8 个测试通过。
+    - A/B：第 2、3 点修改前（v3）对比修改后（v4），同一批 40 条草稿，每条写 4 次。原创帖每边 40 条，回复每边 120 条。按线上实际的检查方式判：原创帖走 DeepSeek 检查；回复先过 Jev，Jev 不过再走 DeepSeek。
+      - **原创帖**
+        - 「@X, thank you / keep that commitment / hold to that timing」这一类：68% → **10%**
+        - 以「@X,」开头直接称呼对方的句子：58% → 10%
+        - 线上检查通过率：85% → 75%。但新模板没通过的 10 条**全部**是下面第 2 条说的误判，旧模板 6 条里有 5 条也是。去掉误判后是 39/40 → 40/40。
+        - 本地检查通过率：92% → 82%（「重复自己最近的帖子」从 2 条变成 7 条，线上会退回重写一次）
+        - 其他基本持平：带「the government says」20% → 18%；以担心开头 8% → 12%
+      - **回复**
+        - Jev 通过率：76% → **81%**
+        - 线上检查通过率：88% → 90%
+        - 接过 No 方说法的次数：0 → 0。240 条回复里一次都没出现，之前那次「On the cheque」没有复现，所以只能说这句提示没有带来副作用，没法证明它起了作用。
+    - **新发现（没有改，交协调决定）：`agent_pipeline._PROMOTED_NOTE` 会把正面的检查提示也判成不通过。**
+      - 规则是：检查提示里只要出现 `conced`，就当作不通过。
+      - 但 DeepSeek 常写「…without conceding」「doesn't concede anything」这样的正面提示，于是被判成不通过。A/B 里 16 条原创帖检查失败，15 条是这样来的。
+      - 线上这会让本来合格的稿子退回重写，两次都这样就成了生成失败。
+      - 建议：把这个规则改成能识别否定说法（例如前面有 without / not / doesn't 时不算），或者只看 `concedes_no` 字段。这属于「生成失败率修复」的范围。
+
+- 2026-10-24 13:20 **green — Blue 页改为按账号显示，新增账号举报按钮；未部署，等协调重载**（会话「Blue 页改为账号为单位」`19af4a8e`）。
+  - 用户原话：「我打算把blue页面，从以帖子为单位改成以账号为单位」「两种合在一起」，以及「还有那个blue也没改好，也没有改成按账号的模式」（协调 `local_968fe272` 转达）。
+  - 后端：
+    - `blue_view.py`：`/api/blue/candidates` 新增 `accounts` 和 `account_summary` 两个字段，原有字段都没变（`blue_view._accounts`）。每个账号一行，包括：
+      - 这个账号的帖子（计划内、可访问、待核对的都在）；
+      - 账号层面的依据：去掉只和单条帖子有关的规则（同文、同时段、链式文本、深楼层、回复延迟）；
+      - 风险评估得出的已确认隐藏数和待复核数；
+      - 采集到的动作数；
+      - `copy_evidence`：给 D99 文案识别留的位置，现在固定是 None；
+      - `account_report`：账号举报资格。不满足时 `missing` 写原因：可信度低于阈值、已认证或认证状态未知、没有确认隐藏的帖子、动作不到 100 次、6 小时内已举报、簇的当天全额名额已满（今天已报的加上计划中的帖子）、证据不足以生成说明。
+    - 排序：Yes 方放最后（D49）；其余先排有事可做的（有计划内帖子或账号可举报），再按已确认隐藏数、动作数从多到少。
+    - 账号举报说明的开头是 "I think that this account is inauthentic (bot) activity because "，只用账号层面的依据。
+    - `blue_submit.submit_account`：只接受资格满足的账号；提交前再读一次 `post_visibility`，确认还有隐藏的帖子；同一个账号 6 小时内不重复提交；每次尝试都记进 `blue_reports_submitted`，带 `target='account'`。新的帖子举报记录带 `target='post'`。
+    - 共享文件 `server.py`：新增 `POST /api/blue/report-account {account_id, confirmed:true}`，没有 confirmed:true 一律 400，提交后清空候选缓存。
+    - B 的文件 `agent_control.py`：在 `report_post` 旁边加了 `report_account`。它用 SDK 的 `Account.report_account`，原因只能是 `ACCOUNT_REPORT_REASONS` 里的值，和帖子举报共用同一个 `report` 限额，并记一条 report 事件。
+  - 前端 `BlueCandidates.tsx`：
+    - 「今日建议」：一个账号一张卡片。卡片上有账号依据、已确认隐藏数和待复核数、动作数、账号举报状态和按钮；卡片里列出这个账号的帖子，每条帖子保留原来的举报和复核按钮。只能举报账号、没有计划内帖子的账号也会出现在这里。
+    - 账号举报和帖子举报一样，先弹确认框，确认后才提交。
+    - 「可访问候选」也按账号分组。
+    - 举报记录表加了一列「对象」。
+    - 文案证据有数据时才显示。
+    - 「待核对建议」照旧按帖子列出。
+  - 测试：
+    - 新增 `tests/test_blue_accounts.py`，16 个测试；
+    - 后端 Blue、风险、hidden_posts、spa、pipeline、clusters 相关共 103 个通过；
+    - 前端 `BlueCandidates` 29 个测试（新增 6 个，改了 3 个原有测试：依据、簇链接和立场标签挪到账号卡片上了），加上风险页、路由和导航，共 121 个通过；
+    - tsc 通过。
+  - 没有用线上数据跑：`build()` 会对平台发 GET 核验，还会写请求日志，所以留到上线后在页面上看。
+- 2026-10-24 12:16 **green — 采集线程在 PG 重启后自动重连、health 报告采集停摆、`browser_receipt:` 部分索引；未部署，等协调重载**（会话 `0a84fe37`，协调（新）`local_968fe272` 转达用户原话：「立刻停机检查，采集出现问题」）。
+  - 我之前的判断有误：02:20 说「连接池会自己重连」，只对每次重新 checkout 的连接成立。采集调度的规划线程 `_loop` 和三条通道 `_worker_loop` 都是在线程开始时 `connect()` 一次、一直用到底。PG 重启后，这条连接永远是死的，线程每 0.5 秒重试一次，每次都失败。这就是第三十七窗口之后采集停了 33 分钟的原因。
+  - 修复：
+    - `db.py` 新增 `connection_lost()` 和 `reconnect_if_lost()`。连接的 socket 已断（psycopg 标记为 closed 或 broken）时，关掉旧连接、换一条新的。换来的连接先跑 `SELECT 1` 验证，以便跳过池子里同样已经死掉的空闲连接（池子最多 8 条）；PG 还没起来时不抛错，下一轮再试。
+    - `scheduler.py` 规划循环和通道循环出错后都调用它。规划间隔改成类常量 `PLAN_SECONDS`，方便测试。没有其他行为变化。
+  - 排查了其他常驻线程，都没有这个问题：RiskMonitor、HiddenPostMonitor、Agent 调度（`AgentController.tick`）、retention、annotations、stance labels、vote tracker、fact extraction、post attribution、AI 任务 watcher，以及各个心跳线程。它们每轮或每次操作都会重新 `connect()`，PG 重启后各失败一次就会恢复。内容分析的 owner 锁连接也是每个 tick 新开一条。
+  - `/api/health` 新增 `collection` 段：`enabled`、`active`（调度线程是否还活着）、`stalled`、`last_run_at`、`quiet_minutes`、`lane_errors`。
+    - `stalled` 的条件：采集开着，并且调度线程已经死了，或者最近一次 collection_runs（或调度启动时间，取较晚的那个）离现在超过 10 分钟。正常每分钟约有 2 条。
+    - **`ok` 不变**：Watch-CTN 只看 `ok`，`ok` 为 false 就会重启后端，所以这里只报告，不触发重启。要告警的话，看 `collection.stalled`。
+  - 部分索引 `idx_checkpoints_browser_receipts`（D96 已批准）：`/api/extension-status` 的两个查询（`server.py:636` 和 `browser_status.latest_portal`）原来每次请求都把 52.7 万行的 checkpoints 全表扫两遍，只为找约 8,400 行收据。上线时 initialize 会建这个索引，锁 checkpoints 表大约一两秒。
+  - 测试：
+    - `tests/test_scheduler.py` 新增 9 个：通道在任务进行中断线后，用新连接认领下一个任务；规划线程断线后能恢复；活连接保持不换；死连接被替换；池子交回的死连接会被跳过；PG 还没起来时不抛错；health 停摆判定 3 个。
+    - 把重连去掉后，这两个线程测试都会失败，说明测试确实测到了修复。
+    - 调度、采集、server、health、schema 相关的 21 个模块，共 232 个测试全部通过。
+    - 临时库验证 `tests/verify_collection_reconnect_postgres.py`：在任务进行中终止临时库的会话，通道和规划线程都恢复了；两个收据查询都走新索引，结果和全表扫描一致（结果在 `reports/generated/collection-reconnect-postgres.json`）。
+  - 已知限制：如果调度线程启动的那一刻 PG 正好连不上，线程会直接退出，这一点没改。现在 health 能看出来：`active: false`、`stalled: true`。
+  - 没有提交、没有重载，没碰 PG 和计划任务。11:45 开始的 WAL 复测因停机作废，之后再测。
+- 2026-10-24 12:12 **green — 前端给 `reasoning_only` 加中文标签「只返回推理、没有正文」，未部署**（会话「生成失败率修复」，协调 `local_968fe272` 转来的要求）。改的是 E 的文件，只用 Edit，每个文件只改一处。
+  - 改动：
+    - `AgentPipeline.tsx`：`errorLabels` 加上 `reasoning_only`。
+    - `ContentResearch.tsx`、`AgentResearchReference.tsx`：原来只给 `output_truncated` 显示橙色「输出被截断」标签，这里照样加上 `reasoning_only` 的标签。
+    - `ReadingSelection.tsx`、`AgentLogs.tsx` 里没有把 error_code 翻成中文的地方，没改。
+  - 测试：
+    - `StagePages.test.tsx`：写作这一行显示「输出被截断 12 · 只返回推理、没有正文 2」。
+    - `ContentResearch.test.tsx`、`AgentResearchReference.test.tsx`：各加一个用例。
+    - 这 3 个文件共 32 个 vitest 用例通过，`tsc --noEmit` 通过。后端停机中，所以没有在浏览器里看页面。
+- 2026-10-24 12:3x **green — 事实每小时硬上限，未部署，等协调重载**（会话「文案识别问题」`9d62c832`，D95，用户选「只改硬上限（推荐）」：做 a + b，不做 c，不改线上事实库）。
+  - 原因（只读）：W35 之后，`phased_after_access` 在 685 条有归因的帖子里用了 431 次，每小时最多 64 次。原来的 `TEAM_HOURLY_LIMIT` 只是排在「顾虑重合数」后面的排序条件，这条事实覆盖 6 个顾虑，所以一直排第一。我方原创帖里带「every eligible Kingstonian」的比例从 35% 升到 57%；423 条这样的帖子里，420 条的归因里有这条事实，所以来源确实是事实库，不是人设。
+  - 改动（`fact_bank.facts_for`）：
+    - 全队过去 1 小时已用满 `TEAM_HOURLY_LIMIT`（3）次的事实，直接过滤掉。
+    - 某个想要的顾虑过滤后一条事实都不剩时，才退回到这个顾虑下全队用得最少的那一条（先比 1 小时用量，再比 6 小时用量），并排在所有未超限的事实后面。
+    - PAIRED：超限的搭档事实不会跟着 `one_in_twenty` 被带进来；没有未超限的搭档时，`one_in_twenty` 照旧跳过。
+    - 只有 `used`（`agent_id`）存在时才会过滤，没有用量数据时行为和以前一样。
+  - 雷达推荐：`agent_pipeline.offered_facts` 原本已经按同样的阈值过滤雷达推荐（第 226 行），所以没有改 `agent_pipeline.py`。decide 的 `fact_ids` 只能从提供的事实里选，所以雷达的 angle 文本也绕不过上限。新测试 `test_radar_picks_and_concern_facts_skip_capped_facts` 走的是整个 `offered_facts`。
+  - 测试：`tests/test_fact_bank.py` 原来「排到后面」的测试改为「不提供」（第 2 次时还在，第 3 次后消失，一小时后回来）。新增 4 个测试：覆盖 6 个顾虑的事实也会被过滤；顾虑全部超限时退回到用得最少的那条，而且排在最后；超限的搭档不会被带进来；雷达推荐和顾虑事实都会跳过。`rotation` 测试里 maya 的 3 次使用挪到一小时以前，因为她自己的使用也算进全队用量。
+    - 通过的模块：`test_fact_bank`、`test_agent_d48_pipeline`、`test_agent_pipeline`、`test_concern_radar`、`test_config_view`、`test_fact_extraction`、`test_fact_routes`、`test_llm_calls`、`test_pipeline_steps`、`test_post_attribution`、`test_results_view`、`test_stock_lines`，共 155 个；py_compile 通过。没有跑全量测试，按规则 3 留给协调。
+  - 已知的漏洞：
+    - 线上 `cost`、`liability`、`outer_islands` 这几个顾虑各只有 1 条事实，这一条会因为退回规则继续超过 3 次。`phased_after_access` 不是任何顾虑的唯一事实（`rushed` 下面还有 3 条）。
+    - 用量只算已发布的帖子，还在写或排队中的稿子不算，所以并发时每小时可能多出 1–3 次。
+  - 上线后的检验标准（也写在测试注释里）：
+    - 任何事实在任何一小时内，我方已发布帖子里不超过 3 次（`post_attribution.fact_ids_json`）；
+    - 我方原创帖里带「every eligible Kingstonian」的不到 10%（W35 后是 57%）；
+    - Jev 通过率和生成失败率不变差。
+- 2026-10-24 12:1x **green — 「只返回推理过程」重新请求一次，未部署，等协调重载**（会话「生成失败率修复」，协调 `local_968fe272` 已批准）。
+  - 改动（只用 Edit）：
+    - 共享文件 `ai_providers.py`：「只返回了推理过程」的两种报错都标上 `error_code='reasoning_only'`，并把它加进 `_safe_diagnostics` 的允许列表。
+    - `agent_control._staged_call`：`attempt == 0` 且 `error_code == 'reasoning_only'`、`finish_reason == 'stop'` 时，用原来的消息再请求一次，不加提示，也不算重写。别的错误不重试，max_tokens 不改。单次调用的那条路径也不改。
+  - 测试：
+    - `test_agent_pipeline`：第一次只有推理、第二次正常 → 成功，两次写作请求的内容完全相同，rewrites=0；两次都只有推理 → 失败，消息和原来一字不差；finish=content_filter 或者别的 ProviderError → 只请求一次。
+    - `test_agent_generation_errors`：报错里带上 `error_code`。
+    - 和 diagnostics、error_code 相关的 17 个模块共 295 个测试通过；py_compile 通过。
+  - 副作用：
+    - 这类调用在 `llm_calls.error_code` 里从 `provider_error` 变成 `reasoning_only`；
+    - 全链路页（`AgentPipeline.tsx` 的 `errorLabels`）没有这个词的中文标签，会直接显示 `reasoning_only`。要加标签请交给 E 的文件。
+    - 内容分析的失败记录也会写成 `reasoning_only`，原来是 `model_request_failed`。
+  - 预期：每 11 小时约 21 次失败里，大多数能在重试时救回；代价是每 75 次写作多一次调用。
+- 2026-10-24 12:0x **green — 重写提示带上具体片段，未部署，等协调重载**（会话「生成失败率修复」，协调 `local_968fe272` 派的任务）。**检查的判定条件和阈值都没改**（6 个词、第一人称句子、照抄 50 个字符）。
+  - 现状（D90 以来，12:52 UTC 起，只读）：
+    - 生成失败 215 / 1,267（17.0%），23 点 UTC 那一小时到了 28%；
+    - 需要重写的 469 个任务里，194 个（41%）重写后仍然失败，其中 personal 71 个、verbatim 14 个。
+    - 原因：写作步骤只拿到一句泛泛的提示，看不到上一稿，也只看到最近 5 条帖子，而 6 词检查是和最近 20 条比的。
+  - 改动：
+    - `agent_pipeline.py`（B 的文件，只用 Edit）：
+      - 新增 `personal_repeats` / `personal_issue`：把重复的 6 词片段合并成连续的一段，用原文的大小写；最多 3 段，每段截到 100 个字符。
+      - 新增 `copied_text` / `verbatim_issue`：把照抄的那一段映射回原文，名字和数字保持原样；最多 2 条事实，附上事实 id。
+      - 新增 `generic_issues`：去掉片段，还原成原来的固定提示。
+      - `local_issues` 改为用上面的函数；`repeated_personal`、`_verbatim`、`copied_facts` 都没动。
+    - `agent_control.py`（两行，只用 Edit）：
+      - F3 换事实的比较改用 `generic_issues(issues)`。不改的话，带了片段之后换事实那一步永远不会触发。
+      - 失败消息也改用 `generic_issues`。所以审计消息和全链路页的失败分组（`pipeline_steps.failure_reason` 按前 160 字分组）和现在完全一样，片段只出现在给写作步骤的 `FIX_THESE_ISSUES` 里。
+    - 测试：
+      - `tests/test_agent_pipeline.py`：照抄片段（含名字、数字的映射）、截断、`generic_issues`；控制器层面：F3 重试时提示里有片段，重复片段出现在重写提示里、但失败消息里没有。
+      - `tests/test_stock_lines.py`：片段合并，以及只看第一人称句子。
+  - 测试结果：
+    - `test_agent_pipeline`、`test_agent_d48_pipeline`、`test_stock_lines`、`test_concern_radar`、`test_llm_calls`、`test_pipeline_steps`、`test_agent_memory_rows`、`test_agent_state_partitions`、`test_agent_store_role_memory`，共 120 个，全部通过；py_compile 通过。
+    - 变异检查：把 `generic_issues` 换成原样返回后，两个控制器测试都失败。
+  - 回放：拿 D90 之前我方 648 条帖子回放，194 条（30%）会被 6 词检查退回，每一条都能取出片段，例如「I am voting Yes on 2 November」「The question I keep hearing is」。
+  - 预期：personal 和 verbatim 这两类失败（占全部失败的 39%）明显减少，这是估计、没有实测。上线后的复测 SQL 在共享笔记 `generation-failures-2026-10-24.md`。
+  - 「推理无正文」查清了：
+    - 21 次失败 = write 19 次 + decide 2 次，全部在 DeepSeek v4.1 flash 的 Morph 上游，write 的发生率 1.3%；
+    - 每次都是 `finish_reason=stop`、正文 0 字；
+    - **不是 max_tokens 不够**：write 上限 8000（reasoning low），成功调用的 p99 是 5,517，这类失败最多只用了 7,134。
+    - 建议（没有实施，`ai_providers.py` 一个字没改）：给这类错误标上 `error_code='reasoning_only'`，`_staged_call` 里像 `output_truncated` 一样重新请求一次。预计每 11 小时救回约 20 次失败。
+- 2026-10-24 11:58 **green — 风险页的「角色」和「队友账号」分组修复，未部署**（会话「Blue 页改为账号为单位」`19af4a8e`，协调 `local_968fe272` 转来用户的问题）。
+  - 问题：已封号的 Ethan、Maya、Peg、Nora 出现在「队友账号」里。原因是 `overview()` 用 `hidden_posts.roles()` 判断哪些是我方，而 `roles()` 不含已封号的角色，这几个号又都在 `team_accounts` 里。
+  - 修复：`risk_assessment.py` 新增 `all_roles(conn)`，列出 agent store 里所有绑定了账号的角色，每个带一个状态：
+    - `suspended`：官方日志或角色行里有封号；
+    - `disabled`：`enabled=false`；
+    - `active`：在用。
+  - 「队友账号」改为 `team_accounts` 减去所有角色账号。`hidden_posts.roles()` 和 `risk_accounts()` 没改，「Agent 执行」那里的封号提示仍然只针对在用的角色。
+  - 前端：「我方账号」表加了一列「状态」（已封号 / 已停用 / 在用）。在用的角色写「在用」，没写「仍在发帖」：「最近发帖」列已经按 6 小时内有没有发帖打了「仍在发帖」标签，两处用同一个词会混淆。
+  - 测试：新增「已封号、已停用的角色在角色组，不在队友组」的后端测试和前端测试。`test_risk_assessment`、`test_hidden_posts`、`test_account_identity`、`test_pipeline` 共 36 个通过；前端 `RiskAssessment` 和 `ownAccounts` 共 8 个通过；tsc 通过。
+  - 在线上库只读跑了一遍修复后的 `overview()`：
+    - 「角色」组 14 个，其中 Ethan、Maya、Peg、Nora 显示已封号；
+    - 「队友账号」只剩 6386 Dr Donald Dixon 和 6387 George.Grant。
+- 2026-10-24 11:45 **第三十七窗口复核：PG 缓存和部分索引**（会话 `0a84fe37`，只读）。
+  - 配置：`shared_buffers` 是 2GB；WAL 三项（lz4、4GB、15min）重启后仍然生效，没有待重启的配置。
+  - 缓存命中率：
+    - 改前（128MB）：93.7%，每秒约 5,100 次块读取；
+    - 重启后第 4 分钟：99.88%，每秒 60 次；
+    - 第 7–17 分钟：99.81%，每秒 108 次。
+  - 新索引 `idx_checkpoints_retention_utc`：20 MB，有效，覆盖 19.6 万行（全表 52.7 万行）；旧索引改前膨胀到 235 MB。10 分钟里被用了 2 次，竞赛收据查询一次读约 2,900 条。
+  - 还剩一个全表扫描来源：`/api/extension-status`。`server.py:636` 和 `browser_status.py:66` 每次请求都要把 checkpoints 全表扫两遍，只为找约 8,400 行 `browser_receipt:`。10 分钟里扫了 94 次，读了 3,680 万行。
+  - WAL：重启后 150 秒的抽样是 2.30 GB/h，样本太短、太嘈杂（刚做完检查点和重载）。正在跑 30 分钟复测。
+- 2026-10-24 02:55 **green — 风险评估模块，未部署，等协调重载**（会话「Blue 页改为账号为单位」`19af4a8e`）。
+  - 用户原话：「你在合适的位置弄一个风险评估模块放这些」「404 的判断规则，第一次看到 404 后，20分钟后还是就被确认把」「你先拿试试把，验证一下」。
+  - 做法：
+    - 平台最新帖子流 `/api/posts?sort=recent` 每页 200 条，游标是 base64 的 `{"t":时间,"i":post_id}`，可以直接跳到任意时间；
+    - 把帖子流和库里同一时段的帖子对比，只有帖子流里没有的才单独 GET 一次；
+    - 第一次 404 记为待复核，满 20 分钟后再 GET，仍是 404 才确认，确认后写进 `hidden_posts`；
+    - 跳过我方角色自己删的帖子。
+  - 调度（一个后台线程）：到期的复核最先做；最新 6 小时每 20 分钟扫一次；6–48 小时每 3 小时扫一轮，分成 6 小时一段；没答复的帖子 5 分钟后重试。
+  - 验证（只读公开 GET，库只读）：
+    - 48 小时用了 764 次请求、8.5 分钟，没有出错，限额剩余量一直是 199；
+    - 帖子流 152,794 条，库里 156,606 条，缺 3,812 条（2.4%），涉及 922 个账号；帖子流里有、库里没有的为 0；
+    - 我方 11 个角色缺的 20 条，正好是 `hidden_posts` 里的 20 条；
+    - 采集器原来只标出了其中 1,755 条 404。
+  - 新文件：
+    - `ctn_data/risk_assessment.py`：`observe` / `scan` / `recheck` / `adopt` / `RiskMonitor` / `account_risk` / `overview`；
+    - `tests/test_risk_assessment.py`（11 个测试）；
+    - `frontend/src/pages/RiskAssessment.tsx` 和对应测试（3 个）。
+  - 共享文件（只用 Edit 小改）：
+    - `db.py` SCHEMA 新增 `post_visibility` 表和 2 个索引（**有 DDL，要随重载上线**）；
+    - `server.py`：`GET /api/risk/overview`（缓存 60 秒）、启动 `RiskMonitor`（首次运行在启动 120 秒后）、`SPA_PATHS` 加上 `processing/risk`；
+    - E 的文件：`navConfig.ts` 在「② 处理」组「账号识别」后面加「风险评估」，`routes.tsx` 加 `/processing/risk`，`routes.test.tsx` 和 `AppShell.test.tsx` 的链接数同步改为 26 / 31。
+  - `hidden_posts.py` 由「风险账号提示位置」改为调用 `risk_assessment.observe()`，接口已经和对方定好。不管谁先上线都可以：模块会按 20 分钟规则自动复核表里旧的、只 404 过一次的行。
+  - 测试：`test_risk_assessment`、`test_hidden_posts`、`test_spa_routes` 共 18 个通过；前端 `RiskAssessment` 、`routes`、`nav` 共 91 个通过；tsc 通过。全量测试没跑。
+- 2026-10-24 02:45 **green — checkpoints 时间索引改成部分索引，等第三十七窗口上线**（会话 `0a84fe37`，用户原话：「使用长期解决方案修改代码，让索引只覆盖清理任务真正需要的键类型。」）。
+  - 改动文件：
+    - `db.py`（SCHEMA）：删掉 `idx_checkpoints_updated_utc`，新建 `idx_checkpoints_retention_utc`。新索引只收 `worker_result:` / `coordination:post:` / `agent_tracking:action:` 三类键。`portable_indexes` 加上新名字。
+    - `agent_competition.py`：收据查询的 LIKE 模式改成写死在 SQL 里。绑定参数的话，PG 判断不出能用这个部分索引。
+    - `tests/test_storage_remediation.py`：新增升级测试。
+    - 新文件 `tests/verify_checkpoint_index_postgres.py`。
+  - 测试：
+    - 和 checkpoints、备份、竞赛相关的 42 个模块，共 607 个测试。唯一的失败是 `test_read_model_regressions`：它会去掉 SCHEMA 里含 ctn_timestamp 的行，第一版把 CREATE INDEX 拆成两行，留下了一行孤立的 WHERE。已改成一行，重跑通过。
+    - 临时库验证全部通过（结果在 `reports/generated/checkpoint-index-postgres.json`）：
+      - 升级时会删旧索引、建新索引；
+      - 清理查询和竞赛收据查询都走新索引，通用（generic）预备计划也走；
+      - 结果和关掉索引、全表扫描时完全一致；
+      - 更新 6 万行 counter_attempt，新索引一字节都没长。
+  - 线上改前实测（旧索引）：清理查询要 385 ms，要扫 20.7 万条才找到 463 条；竞赛收据查询每分钟一次，每次 616 ms，扫 45.7 万条才找到 2,538 条。
+  - 上线影响：initialize 里的 `DROP INDEX` 会给 checkpoints 表加排他锁，建新索引约几秒（线上约 17 万行符合条件），锁一直持有到初始化事务提交。要在重载窗口里做；另外，有别的会话在 checkpoints 上长时间持锁时，会触发 15 秒的 lock_timeout。
+  - 过渡措施：02:40 已对线上旧索引执行 `REINDEX CONCURRENTLY`，235 MB 降到 40 MB，没有锁表。旧索引会随窗口上线被删掉。
+- 2026-10-24 02:20 **PG 共享缓存，等下个重载窗口重启生效**（会话 `0a84fe37`。用户在问答里选了「Next reload window」）。
+  - 已用 `ALTER SYSTEM SET shared_buffers='2GB'` 写入，原来是 128MB。现在 `pending_restart=t`，PG 重启后才生效。
+  - 原因：数据库 3.2 GB，缓存命中率 93.7%，每秒约 5,100 页要从系统缓存里读。
+  - 内存：`shared_memory_type=mmap`，不受容器 64 MB `/dev/shm` 的限制。容器没有内存上限，可用约 31 GB。
+  - 备份：`backups/pg-config-20261024/postgresql.auto.conf.before-shared-buffers`。
+  - **协调：重载窗口里请加这一步**，在 Reload-CTN 之前或之后都可以：
+    1. 执行 `docker exec ctn-postgres-1 psql -U ctn -d ctn -c "CHECKPOINT;"`；
+    2. 执行 `docker restart -t 60 ctn-postgres-1`；
+    3. 等 healthcheck 变成 healthy；
+    4. 执行 `docker exec ctn-postgres-1 psql -U ctn -d ctn -Atc "show shared_buffers"`，应显示 `2GB`；
+    5. 检查 `/api/health`。
+  - 停机约 10 秒。连接池会自己重连（空闲超过 10 秒的连接会先 `SELECT 1` 探活）；重启那一刻正在执行的请求会失败一次。
+  - 回滚：`ALTER SYSTEM RESET shared_buffers;`，然后重启 PG。
+- 2026-10-24 02:2x 封号风险提示换位置（会话「风险账号提示位置」`3277f4`，用户原话：「在角色页、账号页和 Agent 列表里都增加提示，去掉效果和侧栏的特殊显示，在agent执行点会变黄，鼠标放上去能看到同样的提示文字。角色页我方的账户也要标记在我们的系统识别中是npc，高频还是bot」）。未部署。
+  - 后端：
+    - `hidden_posts.py`：新增 `risk_accounts(conn)`，返回结构化的风险列表 {account_id, name, hidden, actions, level: suspend_next | report, text}；`risks()` 改为调用它，输出不变。
+    - `pipeline.py`（共享）：隐藏帖提示从「效果」段移到「执行」段：`metrics.alerts`、`metrics.risk_accounts`、`metrics.hidden_posts`，有风险时状态为 warn，提示文字放在 headline 前面。侧栏「Agent 执行」的点因此变黄，鼠标悬停显示同样的文字。「效果」段不再有 alerts。
+    - `account_identity.py`：我方账号多了 `rule_label`（bot / non_citizen / citizen）。annotations 不会把我方账号存成机器人，但保留了原因，这里按同一条机器人规则（behavior，或 2 个以上的常在线特征）判断。结果顶层多了 `own_risks`。D47 照旧：只用来看风险，不用来调整写作。
+  - 前端：
+    - 新文件 `ownAccounts.tsx` / `ownAccounts.css`：读 `/api/accounts/identity?label=ours&limit=1000`，提供风险标签、风险汇总框、识别标签和识别详情。
+    - `Agents.tsx`：角色卡片和角色详情页加上风险标签和「系统识别：市民 NPC / 高频 / 非市民 / 机器人」标签；列表顶部有风险汇总框；详情页总览有风险警告和识别依据。
+    - `Records.tsx` 账号页：顶部有风险汇总框，有风险的账号旁边加标签。
+    - `AccountIdentity.tsx`（E 的文件，只做了小改）：`labels` 和 `reasonText` 移到 `ownAccounts.tsx` 后再导出；「依据」列按 rule_label 写成"会被判为机器人 / 高频…"。
+  - 测试：`test_hidden_posts`（改为检查执行段）、`test_account_identity`（新增 2 个）、`test_pipeline`、`test_scoring`、`test_account_screening`、`test_annotations` 都通过；前端 `ownAccounts.test.tsx`（新增 4 个）、Agents、AccountIdentity、Records、PipelineHome、AppShell 共 89 个通过；tsc 通过。
+  - 没有改 `server.py`。
+  - 补充（同一会话，跟「举报页面改为账号为单位」`687bee` 商量后，用户原话：「你问问她打算放哪，你俩商量一下」）：
+    - 分工：404 判定规则（首次 404 后 20 分钟复核仍是 404 才算确认）放在对方新建的 `ctn_data/risk_assessment.py`，并新建 `post_visibility` 表，表结构要走重载窗口。`hidden_posts.py` 由本会话改：等对方定好 `observe()` 的签名，`scan_account` 就改为调用它，和对方的表同一个窗口上线。我方风险的显示继续只用 `ownAccounts.tsx`，对方的 `/processing/risk` 页面链接过来。
+    - 已改：
+      - 动作数取「采集到的帖子数」和「我方操作记录」里较大的那个。操作记录是 `agent_audit_events` 里 published 的事件，不算 already_applied 的，只数该账号第一条帖子以后的。
+      - 角色自己删的帖子（delete_post）不计入隐藏。
+      - 文案改成「可能封号」；同时满 100 次动作时补一句「也可能被直接举报」；已有 3 条以上的单独说明。
+      - 测试：后端 23 个、前端 8 个通过，tsc 通过。
+    - 对方定好接口后（`risk_assessment.observe(conn, post_id, account_id, created_at, http_status, at=None, *, skip=None)`）：
+      - `hidden_posts.scan_account` 不再在第一次 404 时直接写 `hidden_posts`，改为对每条帖子调用 `observe`。第一次 404 先记为可疑，20 分钟后复核还是 404 才由对方写进 `hidden_posts`；自己删的帖子跳过；已经可疑或已经隐藏的帖子留给对方复核。
+      - `own_actions` 改成公开函数，给对方用。
+      - **上线约束：`hidden_posts.py` 顶层 import 了 `risk_assessment`，还要用对方的 `post_visibility` 表，必须和对方的 `risk_assessment.py` 及表结构在同一个重载窗口上线。**
+      - 测试：test_hidden_posts、test_account_identity、test_pipeline 和对方的 test_risk_assessment，共 35 个通过。
+- 2026-10-24 02:06:44 PG 写盘配置（会话 `0a84fe37`，用户原话：「Apply the WAL settings now: wal_compression=lz4, max_wal_size=4GB, checkpoint_timeout=15min (no restart), then measure WAL per hour again」）。
+  - 用 `ALTER SYSTEM` 写入 `postgresql.auto.conf`，再执行 `pg_reload_conf()`。不用重启，`pending_restart=f`。
+  - 改动：`wal_compression` off→lz4；`max_wal_size` 1GB→4GB；`checkpoint_timeout` 5min→15min。
+  - 原因：只读体检显示写盘约 1.4–1.8 GB/h，其中约四成是整页镜像；1,246 次检查点里有 102 次是 WAL 满 1 GB 被迫触发的。
+  - 改前基线（5 分钟）：1.83 GB/h，每条 WAL 记录 586 字节，每千条 29 个整页镜像。
+  - 备份：`backups/pg-config-20261024/`。回滚：`ALTER SYSTEM RESET` 这三项，再执行 `pg_reload_conf()`。
+  - 代价：崩溃后的恢复时间会变长一些。
+  - 改后实测（02:07–02:37，30 分钟，负载和改前接近，每秒 946 条 WAL 记录，改前 931 条）：
+    - 写盘 1.46 GB/h，改前 1.83，少了约 20%；
+    - 每条记录 461 字节，改前 586，少了 21%；
+    - 整页镜像每千条 17.3 个，改前 29.1，少了 41%；
+    - 没有因为 WAL 满了被迫触发的检查点。
+  - 剩下的写盘主要是正常的行写入。最大的嫌疑是 meta 里的大块 Agent 数据（每次改写都要整块写进 WAL），这一点还没有验证。
+- 2026-10-24 积压问题排查 `adc8dd`（用户：「按方案修 processing_view.py 的积压和覆盖率计算，加测试，跑全量测试后交给协调会话重载」）：「标注」页（`/api/processing/annotations`）的积压显示 16,154，实际只有 54 条。
+  - 原因：D84 之后，有模型立场标签的帖子写入时 `classifier='model'`。`processing_view.py` 还按 `classifier<>规则版本` 算积压和覆盖率，所以 16,166 条模型已标注的帖子被算成积压。D84（`bc56515`）只改了 `pipeline._process`，这个页面漏改了。
+  - 修复：积压和"已按当前规则标注"都把 `'model'` 算作当前，写法和 `pipeline._process` 一样；页面说明加了一句。新增测试 `test_model_labelled_rows_are_current_not_backlog`。
+  - 只改显示，不改数据，不改表结构。重载后积压应在百位以内，覆盖率约 99.98%（只读实测：规则 290,967 + 模型 16,166 / 共 307,187 帖）。
+- 2026-10-22 A：线上数据改动（用户在 A 会话里原话放行：「允许：按 docs/handoff/A.md 第 3 节改线上事实库、人设措辞并重算归因（先备份）」）。
+  - 事实库：停用 40 条偏 No 的事实（可在事实库页逐条恢复）；phased_after_access / public_vote / no_vote_locks_out 加上 venue_list 标签；venue_list 的反驳改为不列场所。现在生效事实 137 条。备份：backups/facts-polarity-screen-20261022-110023.json。
+  - 人设：Maya / Ethan / Leah / Nora 的 voice 去掉了产生固定模板的句子，Simon 的 stance 去掉了场所清单。通过 AgentController.save 写入。备份：backups/personas-before-voice-cleanup-20261022-112735.json。
+  - 归因重算：已备份到 backups/post-attribution-before-recount-20261022-112750.json，**还没执行**。必须在部署新 post_attribution 的那次重启之后，运行 `docs/handoff/A-attribution-recount.sql`；否则旧代码会用旧口径在 10 分钟内重新结算。
+- 2026-10-22 A：D42 写作改动和本地预检（未部署）。B 交接后用 Edit 改了 `agent_pipeline.py`：
+  - 字数目标按动作拆开：回复 REPLY_WRITE_TARGET=320，原创帖 WRITE_TARGET=480，WRITE_SYSTEM 里用 `{limit}`；
+  - 写作指令改为每条抽取：回复用 `agent_writing.reply_guide()`，原创帖用 `post_guide()`，write_messages 新增可选参数 `rng`；
+  - 原创帖的 FACTS 里带上新闻链接（`fact_bank.public_fact` 加了 url 字段）；
+  - 场所清单规则改为用三条核心事实回应，不再列出 ballot 上的场所；
+  - `local_issues` 新增第 4 个可选参数 facts，并加三种拦截：_CONCEDE（含 D 给的短语）、_VENUE_LIST、回复正文与事实原文逐字重合 ≥40 字符；
+  - `check_issues`：备注提到 conced / unanswered / feeds the No side 的升级为阻断。
+
+  改了 B 的 `agent_control.py` 一行（Edit）：`local_issues(body, action, recent, chosen)`。`fact_routes` 的 prompt 占位符说明加了 `{limit}`。
+  原创帖模板改为 300–480 字，结尾提问约 50%，相关时附链接。
+  `test_agent_pipeline` 里改了两个模板测试和 `test_local_issues` 的 480 断言，并新增两个测试。
+  前端 `contentResearch.css`：在 ≤900px 和 ≤600px 两个断点下，网格改为 `minmax(0,1fr)`，表单项加 `min-width:0`，修复 375px 宽度下的横向溢出（E 报告的问题）。
+- 2026-10-22 C：D41 `/api/clusters` 和 D39 机器人新特征接入（未部署）。
+  - 共享文件：
+    - `server.py`：新增 GET `/api/clusters`；
+    - `db.py`：`account_annotations` 加一列 `bot_metrics_json`，SQLite 已有的库用 PRAGMA 检查后 ALTER；
+    - `postgres.py`：在 `POSTGRES_DERIVED` 里加一行 `ALTER TABLE account_annotations ADD COLUMN IF NOT EXISTS bot_metrics_json`。
+    - 重载时 schema 指纹会变。
+  - C 自己的文件：
+    - 新建 `clusters.py` 和 `citizens.py`。`citizens.py` 只是一层转接，直接调用 B 的 `agent_targeting.citizen_accounts`。
+    - `pipeline.py` 的市民回复改用这个共享口径。
+    - `annotations.refresh_accounts` 接入 B 的 `bot_feature_flags`：`is_bot` = behavior 命中，或四个特征命中 ≥2 个；只有 duplicate_text 或只命中 1 个特征时只做标注；**本队账号一律不标为机器人**。
+    - `queries`、`insights` 去掉另外判断 'behavior' 的那一层，统一直接读 `is_bot`。
+- 2026-10-22 A：`post_attribution` 统一市民口径（未部署）。settle 统计的回复作者、capture 的 target_bot 都改为排除 B 的 `agent_targeting.bot_accounts` 和 `non_citizens`（与 targeting 口径相同），不再使用 duplicate_authors 和 behavior_bots。已经结算的旧记录不会重算。新增测试 `test_settle_ignores_heavy_volume_repliers`，test_post_attribution 5 个通过。回复模板（REPLY_TEMPLATE）新增：先说出读者担心的代价，再用一条事实满足他的条件；禁止复述 No 方的说法（"清单未公布""空白支票""日落条款""没有结束日期"），也禁止列出 ballot 上的场所。结尾怎么分配在等协调决定。
+- 2026-10-22 A：深度报告 ③ 和 ① 的第一部分（未部署，只改 A 的文件）。`fact_bank.facts_for` 的排序改为：顾虑重合度 → 本账号 6 小时内用满 3 次的事实放到最后 → 核心事实在新闻事实前 → 全队 6 小时内用得少的在前（轮换没用过的核心事实）→ 最新的在前；新增 `usage()`（读 post_attribution），`facts_for` 增加 `agent_id` / `used` 两个可选参数。one_in_twenty 只和 icu_capacity / surge_150 一起提供。`insert_extracted` 加了偏 No 筛查（NO_LEANING 正则）：自动生效模式下命中的事实留在待审，备注"可能偏向 No 方"。种子：phased_after_access / public_vote / no_vote_locks_out 加上 venue_list 标签，venue_list 的反驳不再列出场所。`agent_writing`：新增 `REPLY_TEMPLATE` 和 `reply_guide(rng)`，回复按 220–320 字写、只用 1 个事实并转述，每条回复抽取开头和结尾（提问约 25%，"所以投 Yes" 约 35%），不再用 "fair worry" 或"名字加逗号"开头；`REPLY_GUIDE` 保留为固定版本，所以现在的 pipeline 不需要改也能正常运行。测试：test_fact_bank 13 个、test_agent_writing、WritingTemplateTests 共 29 个通过。test_agent_pipeline 里 B 正在改的两个测试（must_post / forced_post）目前失败，与 A 无关。
+- 2026-10-22 C：`/api/pipeline/status`（未部署）。
+  - 共享文件 `server.py`：在 blue 路由后面新增 1 个 GET 路由，`PipelineStatus` 复用已有的 `nav_status` 和 `blue_candidates` 实例。
+  - C 自己的文件：新建 `pipeline.py`；`blue_view.BlueCandidates` 新增 `peek()`，只读缓存、不计算。
+  - 测试：新建 `tests/test_pipeline.py`、`tests/verify_pipeline_postgres.py`。`tests/test_nav_status.py` 种子数据里的审计事件补了 id：PG 里这一列不能为空。
+- 2026-10-22 E：开始 S-A（未部署）：按 `docs/PIPELINE_UI_SPEC.md` 把侧边栏改成数据流顺序。改动：`nav/navConfig.ts`、`nav/Sidebar.tsx`、`nav/nav.css`、`routes.tsx`；新增 `pages/StagePlaceholder.tsx`（8 个占位页：/processing、/processing/bots、/strategy、/agents/pipeline、/results/attribution、/results/exposure、/settings、/system/maintenance）。**共享文件 `ctn_data/server.py`**：`SPA_PATHS` 加上这 8 个路径。按 D36 不做 /agents/manual。旧 URL 全部保留。
+- 2026-10-22 A：事实库页配合 E 的侧边栏规格（未部署，只改 A 自己的文件）。`FactBank.tsx` 的标签和 URL `?tab=` 同步（pending / active / superseded / retired / rejected / rules / extraction / prompts，切换时用 replace 更新；未知值回到待审）。新增"事实提取"标签：显示开关、模型和审核方式的当前状态，以及最近 30 条提取记录（新接口 `GET /api/agents/facts/extractions`，在 `fact_routes.py` 里，读 `fact_extraction.recent`，只读）。测试：`test_fact_routes` 6 个通过，`FactBank.test.tsx` 7 个通过，tsc 通过。
+- 2026-10-22 E：`frontend/src/pages/Agents.tsx` 的草稿卡加了"排队发布 / 取消排队"（F 的 D26 第 20 项前端），未部署。只在成员手动准备、待确认的发帖 / 回复 / 转发草稿上出现，调用 `POST /api/agents/manual/queue` 和 `/manual/queue/cancel`。排队中显示尝试次数和截止时间，"发布"换成"取消排队"，正文不能改；排队结束后显示结果（已发送 / 超时 / 已取消 / 已停止）。正文改过就不能排队，因为后端只发送预览过的正文。没有动 B 的动作选项和目标逻辑。新增测试 `pages/AgentManualQueue.test.tsx`。
+- 2026-10-22 D：用 Edit 改了 B 的 `agent_observation._finish_channel`（B 已同意）：合并收件箱时加 `first_seen_at`，保留第一次拉到这条通知的时间；`observed_at` 照旧是最近一次拉取的时间。新增测试 `test_inbox_keeps_first_seen_time_while_observed_at_follows_each_refresh`。
+- 2026-10-22 A：P1-3 写作模板（未部署）。改了 B 的 `agent_pipeline.py`（均用 Edit）：
+  - `WRITE_SYSTEM` 里原来的 "Structure: 1)…" 一句换成 `Worry to answer: {concern_hint}.` 加 `{guide}`；
+  - `write_messages` 按动作插入 `agent_writing.POST_GUIDE` / `REPLY_GUIDE`；回复会带上 `AUTHOR_RECENT_POSTS`（新函数 `author_recent_posts`：目标作者最近 3 条公开帖子，不含被回复的那条），这在函数内部查询，没有改 agent_control；
+  - import 加了 `agent_writing`。
+  A 自己的 `agent_writing.py`：`POST_GUIDE` 改为面向所有犹豫的读者。测试 `test_agent_pipeline.py` 末尾新增 `WritingTemplateTests`（2 个）。`agent_pipeline` 已交还 B。
+- 2026-10-22 C：第三阶段后端（未部署）。
+  - 共享文件 `server.py`：新增 `GET /api/insights`；`/api/accounts` 改为传入 insights 缓存里的作者互动分，只有 `sort=engagement` 时才会在后台触发重算。
+  - C 自己的文件：新建 `insights.py`；`queries.accounts` 扩展了字段，返回值只增加了字段，原有字段不变。
+  - 性能：线上算一次约 13 秒（其中 SQL 10 秒），在后台线程里运行，不阻塞请求。冷启动后第一次打开分析页需要等这么久。
+- 2026-10-22 10:20 D：第三批修复（未部署）。
+  - 用 Edit 改了 B 的 `agent_reading.py` 第 381 行（D13 授权，事先已告诉 B）：选读出错时，diagnostics 里的 `error_code` 和显式参数撞名，抛 TypeError。线上 2 小时 11 次"角色任务未完成；敏感错误已隐藏"都是它。现在把它改存为 `error_cause`。新增回归测试 `test_truncated_selection_falls_back_and_records_its_cause`。
+  - `llm_calls.REASONING` 把选读改为 `none`：实测 low 对选读无效（思考中位数 3,907 token，Baidu 2 小时 12 次思考满 8000 被截断）；none 在 Baidu 上实测思考 0 token、2 秒。
+  - 共享文件 `ai_providers.py`：结构化输出解析不出 JSON 对象时，自动重发一次（只对带请求策略的调用生效；InferenceNet 偶发）。
+  - `scripts/measure_llm.py`、`scripts/openrouter_balance.py` 按规则 6 禁用了 initialize。
+- 2026-10-22 10:10 A：
+  - `scripts/measure_kpis.py`（交给 A，D28）：新增 `exposure` 段，内容是每小时浏览数、向我方转变次数（含 primary）、无偏向转变次数、我方发帖 / 回复比例。按最近 N 份已导入的官方小时报告计算。
+  - `agent_writing.py`（A 的文件）：新增 `POST_GUIDE` 和 `REPLY_GUIDE` 两段写作模板常量，还没有接入写作步骤，等 B 交出 `agent_pipeline`。
+  - 提醒 B：`agent_control.py` 第 1373 行目前有语法错误（引号没配对，旁边是全角逗号），所有 import agent_control 的测试都会失败。
+- 2026-10-22 F：D29 完成，未部署。
+  - 用 Edit 改了 B 范围内的 `agent_routes.py`：`ManualPrepareRequest` 只加 3 个可选字段，`acknowledge_warnings`（布尔）、`fact_ids`（字符串列表，最多 6 个）和 `concern`（字符串，最长 40），不改其他路由。
+  - `agent_manual.py`：
+    - ① 回复目标复查。机器人、第 8 层及以后、我方已回（包括正在发送中的草稿）、暂时无法核对，这几种必须带 `acknowledge_warnings` 才能准备，否则返回 409，不建草稿。排队每次重试前再查一遍，出现没确认过的项目就停止排队。线程满 2 条、6 小时内已答、不可说服三种只提示。
+    - ② @ 上限：帖子 4 个、回复 3 个。
+    - ③ `preview.style_warnings` 只提示，不阻断。
+    - ④ `preview.context`：上级对话、作者近 3 帖、立场、顾虑、层数，疑似凭据的条目会被去掉。
+    - ⑤ `fact_ids` 只接受生效中的事实，`concern` 取 `fact_bank.CONCERNS` 之一；两者写进草稿，供 `post_attribution` 使用。
+    - 不带新字段的请求，幂等标识和以前一样。
+  - 测试：新增 `tests/test_agent_manual_preflight.py`（11 个），`test_agent_manual_queue.py` 增加到 14 个。接口说明见 `MANUAL_POSTING_REVIEW.md` 第 6 节末尾，前端交给 E。
+- 2026-10-22 E：**共享文件 `ctn_data/server.py`**：修复直接打开或刷新 `/blue` 时返回 404 的问题。前端路由白名单从 `frontend()` 函数里搬到模块级常量 `SPA_PATHS` / `SPA_AGENT_PATH`，并加上 `blue`；判断逻辑不变。新增 `tests/test_spa_routes.py`：解析 `frontend/src/routes.tsx`，保证两边一致（缺了或多了都会失败）。
+- 2026-10-22 05:11 A：线上数据改动（事实库，A 负责的范围）。停用 5 条复述 No 方抱怨的新闻事实：场所清单要等投票后才确定、旅游业要求澄清、隐私倡导者要求澄清。这些事实本身属实，但写作步骤引用后会被检查判为让步。备份在 `backups/facts-retire-no-talking-points-20261022-051104.json`，可以恢复。
+- 2026-10-22 B（未部署）：
+  - P0-2 后半：`_generate` 在建提示词之前先算 `effective_actions`，`agent` 换成 allowed_actions=effective 的副本，提示词、schema 和校验用同一份列表；没有可用动作时不调模型，记一条 skip 事件。`_staged_decision` 在写作之前先调用 `agent_pipeline.decision_problem` 校验，不合格只重试决策一次，两次都不合格就直接报错，不进入写作和检查。
+  - P1-3：`agent_targeting.blocked_reason` 新增 `not_persuadable`（stance 是 yes，或与公投无关且没有通知）、`answered_recently`（6 小时内已就同一顾虑回复过此人）、`not_a_citizen`（新闻账号）。
+  - P1-1：新增 `bot_accounts`（读 account_annotations 里的 behavior 标记）和 `depths_for`（读 post_annotations，缺的现场补算）。表不存在或为空时退回现场计算。
+  - D26 ③：tick 里 publish 候选先做公平轮转，再按 `agent_budget.priority_for` 稳定排序。
+  - 其他：被屏蔽资料立即记为已处理时，跳过 context_only；`effective_actions` 把被策略屏蔽的目标仍算作有目标，保留原来的终止拦截流程。
+  - 测试：改了 4 个测试文件的样例帖子文字（notification_binding、operational_intents、reading_integration 各一处，在文字里加 referendum，断言没改），新增若干 pipeline 和 targeting 测试。
+- 2026-10-22 E：S1a 和 S1b（未部署）。
+  - S1a：新增 `pages/PaceAlert.tsx`（含测试）；`Overview.tsx` 加一行，在顶部显示速度预警，只读 C 已上线的 `threshold`。
+  - S1b：新增 `pages/BlueCandidates.tsx`、`blueCandidates.css`（含测试）；`routes.tsx` 新增 `/blue`；侧边栏「Blue 举报」改指向 `/blue`，原来的账号筛查从页面里链接过去。页面只读：没有任何提交按钮，只发 GET 请求；接口没有返回 `submits_reports:false` 时不显示内容。C 的 `/api/blue/candidates` 上线之前，这个页面会显示"读取失败"。
+- 2026-10-22 F：D26 第 20 项，人工帖排队（未部署）。
+  - `agent_manual.py`（F 负责）：新增 `queue_publish` / `cancel_queue` / `drain_queue`。成员确认后，草稿上记 `manual_queue`，有效期 15 分钟。每次都照常走 `controller.publish`（`automatic=False`），走的是 D 的 `publish_priority`（人工 = 0）。只有本地拒绝且草稿仍为 pending 时，才按 `retry_after` 重试：额度等待、执行器忙、平台限流、角色租约占用。发出、结果不确定、平台明确拒绝、过期、取消或丢弃，都结束排队；除已发出外都调用 `release_priority`。
+  - 用 Edit 改了 B 的 `agent_control.py`：`tick()` 在 recover 之后、`settings.enabled` 检查之前加了 2 行 `agent_manual.drain_queue(self, data)`。这样队伍自动运行暂停时，人工排队照常处理；维护期间不处理，因为 tick 开头就返回了。
+  - `agent_routes.py`（不在归属表里）：新增 `POST /api/agents/manual/queue {draft_id, body?}` 和 `POST /api/agents/manual/queue/cancel {draft_id}`，新增 `ManualQueueRequest`，共 15 行。
+  - 新测试 `tests/test_agent_manual_queue.py`（12 个）。前端还没接，交给 E：草稿卡加「排队发布」「取消排队」按钮，显示 `manual_queue.state / next_attempt_at / attempts`。
+- 2026-10-22 D：D26 ①②（未部署）。
+  - `agent_budget.py`：新增 `PUBLISH_PRIORITY`、`publish_priority(level, key)`、`priority_for(draft)`、`release_priority(controller, bucket, key)`。高优先级的发送等额度时，在 `rate.priority_holds['post']` 登记占位，有效期为 retry_after + 30 秒；更低优先级的 reserve 要给它留出名额。
+  - 用 Edit 改了 B 的 `agent_actions.py`（事先已告诉 B，D26 授权）：`execute` 里的 `write()` 把 `budget.call` 包在 `publish_priority(priority_for(original), key=draft_id)` 里，共 2 行。
+  - 新测试 `tests/test_publish_priority.py`。
+- 2026-10-22 D：第二批（未部署），只动了 D 自己的文件和新文件。
+  - S2：`llm_calls.REASONING` 把选读、写作、检查、事实提取设为 `reasoning.effort=low`，决策保持 auto。
+  - S4：新文件 `ctn_data/llm_gateway.py`，所有记账的调用都要先经过一个全局闸门。上限 6，给 Agent 预留 2 个；优先级依次是写作和检查、决策、选读、交互、后台；遇到 402 会收紧上限。
+  - 共享文件 `ai_providers.py`：新增 `reasoning_effort` 参数，在 `complete` 里接入闸门。
+  - 新增测试 `tests/test_llm_gateway.py`；`tests/test_llm_calls.py` 补了用例。
+  - 没改别人的文件。
+- 2026-10-22 03:40 A：P1-2 完成（未部署）。
+  - 共享文件 `db.py`：新增 `post_attribution` 表和索引 `idx_post_attribution_time`，放在 `fact_extractions` 后面，和 C 的 annotation 表互不影响。
+  - B 的 `agent_control.py`：`start()` 里加了一行 `post_attribution.start(self)`，用 Edit 改。
+  - A 自己的文件：新建 `post_attribution.py`（capture、settle、arm_stats、enrich，每 10 分钟运行一次）；`content_research.context_for` 对雷达上下文执行 `enrich`；`concern_radar` 的证据和提示词加入 `measured_arms`。
+  - 测试：新建 `tests/test_post_attribution.py`；`tests/verify_fact_bank_postgres.py` 加了一个 PG 测试。
+- 2026-10-22 C：P1-1、N8、Blue 候选接口都已完成（未部署）。
+  - `server.py` 新增两个 GET 路由：`/api/nav/status`、`/api/blue/candidates`。
+  - lifespan 增加 `annotations` 线程：每 60 秒处理不超过 5000 帖，首次补标约 30 分钟。
+  - **重载后 schema 指纹会变**，启动时会建两张新表和三个索引（`post_annotations` 空表，建表很快）。
+  - **提醒各会话**：`AgentStore(...)`、`analytics.analyze`、`scoring.score_*` 都会调用 `initialize()`。工作目录的 SCHEMA 比线上新时，在本机对线上库跑这些函数，会在线上执行 DDL。C 已经碰到过一次：被死锁中止并回滚，线上没有留下改动。对线上库跑脚本前，先把 `postgres.initialize_postgres` 替换成直接抛错的函数。
+- 2026-10-22 C：开始 P1-1 统一标注表（未部署）。
+  - 共享文件 `db.py`：在 `llm_calls` 的两行索引之后加 `post_annotations`、`account_annotations` 两张表和索引，只追加，不动 A 的 `post_attribution` 和 D 的 `llm_calls`；表达式索引登记进 `portable_indexes`。
+  - 共享文件 `server.py`：lifespan 里加 `annotations` 后台线程的 start/stop，各一行。
+  - 新建 `annotations.py`；`queries.py` 的帖子列表和详情加 `stance`、`concerns`、`is_bot`。
+  - 只调用 B 的 `agent_targeting.classify` / `behavior_bots` / `duplicate_authors` / `thread_depths`，不改 B 的文件。
+- 2026-10-22 03:15 A：开始 P1-2。要改的共享文件：`db.py` 的 SCHEMA 在 `fact_extractions` 后面新增一张表 `post_attribution`（只追加，不动其他表）。要改 B 的文件：`agent_control.start()` 里加一行启动 `post_attribution` 的后台线程（照 fact_extraction 的写法，用 Edit 改）。其余都是 A 自己的文件：新建 `post_attribution.py`，改 `content_research.context_for`、`concern_radar`。
+- 2026-10-22 E：开始 S1（未部署）。
+  - **共享文件**：`frontend/src/main.tsx` 只保留启动代码，主题改读 `ui/theme.ts`，外壳和路由搬到新文件；api 客户端不动。`frontend/src/style.css` 删掉旧顶栏、`main`、页脚和 `page-intro` 的规则，这些搬到 `nav/nav.css`。
+  - 新增文件：`nav/`（`navConfig` `AppShell` `Sidebar` `Breadcrumbs` `NotFound` `redirects` `nav.css`）、`routes.tsx`、`ui/`（`theme.ts` `tokens.css` `ConfirmButton.tsx`）及对应测试；`.claude/launch.json`（vite dev 用 5180 端口预览，不构建 dist）。
+  - 删除 A 交给我的 `pages/AIWorkflow.tsx/.css/.test.tsx`（D17）。重定向逻辑搬到 `nav/redirects.tsx`，原来的重定向测试搬到 `routes.test.tsx`。
+  - 修两个缺陷（D20）：`AISettings.tsx` 删除连接前要确认；`Records.tsx` 的 3 个站内链接改成 `<Link>`。
+  - `Analysis.tsx` 的重定向改为从 `nav/redirects` 导入，只改这一行。
+- 2026-10-22 B：P0-2 前半（未部署）。`agent_decision.py`：新增 `effective_actions`，`response_schema` 的 action enum 改用它，没有有效动作时退回 allowed。`agent_control.py`：新增 `AgentStore.mark_decided`（在 agent_control 锁内只合并 `memory/<role>/decision_versions` 和 `decision_notification_ids` 两行，上限都是 600）；`_generate` 在 mark_blocked_targets 之后调用它，失败只记日志。没碰 `_staged_decision`、`agent_pipeline.py`。测试：`test_agent_pipeline` 新增 2 个，并扩展了 1 个。
+- 2026-10-22 C：P0-1 改了 `scoring.py`（新增 `score_pace`，没人认领，归 C）、`queries.py`（overview 新增 `threshold`，和积分摘要共用 30 秒缓存），测试改了 `test_scoring`、`test_server`。没改 `server.py`、db、前端。
+- 2026-10-22 02:34 A：线上数据改动。
+  - D3：把 31 条被同一篇报道的事实错误取代的新闻事实恢复为 active（9 个主题）。备份在 `backups/facts-superseded-repair-20261022-023411.json`。注意：线上的 `fact_bank._activate` 仍是旧版，重载前新提取的事实还会被错误取代，重载后 A 会再检查一次。
+  - D2：自动分析间隔从 3600 秒改为 7200 秒（revision 7）。备份在 `backups/research-automation-before-interval-20261022-023435.json`。
+- 2026-10-22 02:32 A：雷达审查 1–3（A 自己的文件，未部署）：`concern_radar.py` 的取证据查询只要公开帖子和公开作者（常量 `PUBLIC`，和 `ai_evidence` 的规则一致）；`validate` 去掉自由文本里的 `[post:…]` / `[news:…]` 引用，跳过不是 dict 的条目；`tests/test_concern_radar.py` 新增 1 个测试。
+- 2026-10-22 D（已完成，green）：第一批（E1 记账 → E3 max_tokens → E2 402/429 退避 → session_id）。实际改动的文件如下，补丁已备份到 D 的 scratchpad `d-batch1.patch`：
+  - 共享文件：`db.py` 的 SCHEMA 新增 `llm_calls` 表和索引，只做加法；`postgres.py` 预计不用改（主键用 TEXT）。
+  - `ai_providers.py`：新增 `max_tokens`、`session_id`、`retry_budget_seconds`、`ledger` 参数，不传时行为不变；402 不再当作普通 502 处理。
+  - `agent_budget.model_call`：新增 `purpose` 和 `trace` 参数；没传 `purpose` 时，按 response_schema 推断调用类型。
+  - 别人的文件，都用 Edit，各改一两行：`agent_generation.request_options` 加 `trace`（agent_id 和 job_id）；`ai_routes.invoke`（A）加 `purpose`，研究、雷达、连接测试的调用处各加 1 个参数。
+  - 新文件：`ctn_data/llm_calls.py`、`tests/test_llm_calls.py`。
+  - 不改 `agent_control.py` 和 `agent_pipeline.py`。完成后通知 C 和协调会话。
+- 2026-10-22 02:35 A：检查误判修复 a–d（D9），未部署。改了 B 的文件（均用 Edit）：
+  - `agent_pipeline.py`：`WRITE_SYSTEM` 允许使用人设 stance 里的事实，禁止断言"已经/还没有公布、任命、决定"，场所清单只按选票上的场所类型和"先给所有人接种机会"回应；`CHECK_SYSTEM` 重写 concedes_no 和 unsupported 的判定规则；`check_messages` 用全部生效事实（按 id 排序放在 system 开头，加上 DO_NOT_CLAIM，以便命中缓存），user 部分加入 PERSONA；`check_issues` 过滤长度小于 12 的 unsupported 条目。
+  - `agent_control.py` 第 1728 行：`check_messages` 调用加 `persona=agent`。
+  - 测试：`test_agent_pipeline.py` 新增 3 个测试。
+  - `agent_pipeline` 已交还 B。
+- 2026-10-22 02:25 D：协调要求，新建只读脚本 `scripts/openrouter_balance.py`，服务代码没有改，也没有测试文件。脚本只查 OpenRouter 的 `/api/v1/credits` 和 `/api/v1/key`，不打印 key；每次运行往 `reports/generated/openrouter-balance.jsonl` 追加一行。新文件 `docs/AI_CALL_EFFICIENCY.md`。
+- 2026-10-22 C：`useApi` 的 interval 参数类型从 `number` 扩为 `number|false`（`false` 表示不轮询），向后兼容，现有调用不受影响。`DataTable` 的行 key 改为按行对象分配序号，不再用 `JSON.stringify(row)`。`vite.config.ts` 新增 manualChunks，把 echarts 和 react 拆成单独的 vendor 包，首屏 gzip 大小不变（约 205 KB）。
+- 2026-10-22 02:15 协调：git 基线 `78386ff`；协调板改为"代用户决定"模式。
+- 2026-10-22 B：用 Edit 改了 A 的 `tests/test_content_research.py` 一行：断言的原句"自主选择发帖、回复"改为新提示词里的"只在 allowed_actions 内自主选择动作"。
+- 2026-10-22 B（补记）：已把 5 个账号的 allowed_actions 改为 post、reply（版本号 +1，旧草稿作废）。备份在 `backups/allowed-actions-targeting-20261022/agents-before.json`。
+- 2026-10-22 B：代码改动（未重载）。新增 `agent_targeting.behavior_bots` / `thread_depths` / `mark_blocked_targets`；提示词和 schema 只列出开放的动作。改了 A 的两个文件（均用 Edit）：`concern_radar._excluded_authors` 额外排除 behavior_bots；`fact_routes.py` 的 placeholders 加了 3 项（这两个文件没有备份，改动各只有一两行）。B 自己的 agent_* 原文件备份在 `backups/allowed-actions-targeting-20261022/`。
+- 2026-10-22 01:35 A：顾虑雷达完成（未部署）。改过 B 的文件：`agent_targeting.py`（新增 `radar_weights`，`annotate` 加 radar 分）、`agent_pipeline.py`（`radar()`、`offered_facts`/`decide_messages`/`write_messages` 增加 strategy 参数）、`agent_control.py`（`_staged_decision` 两处调用传 strategy），均在 B 本轮修改之前；之后只用 Edit 改。
+- 2026-10-22 01:25 协调：建立本文件。
+
+## 第一个重载窗口
+- **A 交接**：后端 `concern_radar` `content_research` `content_research_schedule`（新增 mode，默认 radar） `ai_routes` `agent_targeting.radar_weights` `agent_pipeline`（priorities / RADAR_NOTE / ANGLE_HINTS） `agent_control._staged_decision` `fact_bank._activate` `fact_routes`（新增 `GET /api/agents/facts/gaps`）；前端 `FactBank` `ResearchAutomation` `ContentResearch` `AIReview.css`；测试 `test_concern_radar`（新建）`test_fact_bank` `test_fact_routes` `test_content_research_schedule`、前端 2 个
+- **B 交接**：后端 `agent_targeting`（`behavior_bots` 72 小时行为判定、`thread_depths`、`mark_blocked_targets`，annotate 改为行为机器人 + 重复文字仅作参考 + `thread_too_deep`）、`agent_relationships.allowed_post_targets`（排除 `target_blocked`）、`agent_decision.response_schema`（动作、目标、说明只按 allowed_actions）、`agent_pipeline`（决策提示按 allowed_actions 生成）、`agent_control._generate`（决策前标记不可选目标；单次调用提示按 allowed_actions 生成）、`agent_competition` 目标文字；改了 A 的 `concern_radar._excluded_authors` 和 `fact_routes` placeholders；测试 `test_agent_targeting` `test_agent_pipeline` `test_agent_competition` `test_content_research`（A 的，只改一行原句）。线上 5 个账号的 allowed_actions 已经是 post、reply。
+- B 重载后检查：新草稿只有 post / reply；`agent_audit_events` 里出现"互动目标不在本次阅读资料中"的次数不应明显上升；回复对象里不再有机器人类账号（按 `behavior_bots` 判定），也不再有落在第 8 层及以后的回复。
+- **C 交接**（第一阶段，备份在 `backups/phase1-perf-20261022/`，含改前的 dist）：
+  - 后端
+    - `queries.overview`：`score` 只返回摘要，去掉 `reconciliation` 和 `snapshots`，每个进程缓存 30 秒；`posts_without_counters` 改为读 `counter_sampling.has_sample=0`（线上核对与原 NOT EXISTS 结果一致：7084 = 7084）。
+    - `analytics.analysis_parameters` / `analyze`：新增 `cohort_limit` 参数（默认 50，最大 10000），返回值新增 `cohorts_total` 和 `cohorts_truncated`；统计口径和 `exportable` 仍覆盖全部账号。
+    - `analysis_cache`：`CACHE_VERSION` 改为 3，`cohort_limit` 归入 VIEW_OPTIONS。
+  - 前端
+    - `api.ts`：useApi 的 interval 可传 `false`。
+    - `Records.tsx`：帖子、账号、新闻、标签列表和帖子详情不再每 15 秒轮询。
+    - `Overview.tsx`：改为 60 秒刷新。
+    - `Analysis.tsx`：PostEvidence 不再轮询；账号对比显示"N / 总数"，带"显示全部账号"按钮。
+    - `analysisModel.ts`：保存快照和导出时带 `cohort_limit=10000`；`common.tsx`：DataTable 行 key；`vite.config.ts`：vendor 分包。
+  - 测试：`test_server`（新增 overview 测试）、`test_analytics`（新增 cohort 测试）、`analysisModel.test.ts`（期望加上 cohort_limit）。
+- C 重载后检查：
+  - `/api/overview` 返回不超过约 5 KB，二次请求不超过约 0.3 s，页面上的数字和以前一样。
+  - `/api/analysis?sections=core&include_exportable=false` 只有约 70 KB，`cohorts` 50 条，`cohorts_total` 约 7000；"账号对比"标签页的"显示全部账号"按钮可用。
+  - 浏览器 Network 面板里，帖子页停留 1 分钟不应再出现重复的 `/api/posts` 请求。
+  - Agents 页"账号分析"链接（`?author_id=…&analysis_tab=cohorts`）照常只显示该账号。
+- 重载后检查：`/api/health` 正常；维护状态 `active: false`；`/ai/facts` 返回 200；下一轮自动分析生成 `kind=concern_radar` 的报告。如果重载被打断：先用 `agent_maintenance status --id` 查看，确认已经 drained，再执行 finish（D 授权）。
+
+## 部署记录（最新在上）
+- 2026-10-24 19:10 **第四十四窗口**（协调 `local_968fe272`，git `a2f30d1`，D114/D116）。维护期 08:10:18–08:10:43 UTC，Agent 保持关闭（D113）。内容：写作提示重排（方案 B）、改写沿用第一稿的指南（方案 A）。后端全量 2,207 个测试全部通过；没有前端改动。Reload-CTN result=ready，health 正常，启动日志没有报错。用户重新打开 Agent 后，按「文案识别问题」和 gen-failures 的检验标准复测。
+- 2026-10-24 18:16 **第四十三窗口**（协调 `local_968fe272`，git `71d6c32`，D110/D112）。维护期 07:15:48–07:16:35 UTC。Agent 在 D113 关闭状态下重载，重载后保持关闭。
+  - 内容：competition sync 在 off 时不拿锁；tick 少读、合并游标写、空转 5 秒；游标挪到单独一行，旧 competition posts 和 model_requests 搬到冷存储行（不删）；角色上限只数没被封的角色；Blue candidates 改到子进程（父进程 CPU 0.03 秒，原来约 17 秒），接口有 timing；影子复核（`post_visibility_shadow`，5 和 10 分钟只记录，到期复核每 60 秒检查一次）；Colin 替补人设草稿。
+  - 测试：后端全量 2,202 个里有 1 个失败（`test_agent_budget_runtime` 时钟回拨，renew 0≠1，负载下偶发；单独连跑 3 次都通过，这个文件从基线起没改过）；这次没有前端改动。
+  - 重载前备份 rate 行：`backups/rate-before-w43-20261024T071514Z/`。
+  - Reload-CTN result=ready，18:16:33 ready，health.collection 正常，启动日志没有报错；新表和冷存储行已建，rate.competition 785 KB→139 KB；/blue、/analysis/leaderboard、/processing/risk 都返回 200；排行榜已有 3 份快照。
+  - 待做：用户在工作台重新打开 Agent 以后，gen-failures 和「数据库连接和性能」做「改后」测量；影子复核攒 4–6 小时后由举报页面会话汇报；Marta 现在可以创建了（需要用户登录工作台，或者用户自己创建）。
+- 2026-10-24 17:27 **第四十二窗口**（协调 `local_968fe272`，git `13d4cfd`，D108/D109）。维护期 06:26:10–06:27:12 UTC。
+  - 内容：停权账号运行时跳过（不改 enabled）、退回正文写进 generation_failed（300 字，经过 _SECRET 清洗）、`citizen_replies` 判定失败时显示「—」。
+  - 测试：后端全量 2,171 个通过（跳过 24 个）；这次没有前端改动。
+  - Reload-CTN result=ready，health.collection 正常，启动日志没有报错，Agent 已恢复。
+  - 第四十一窗口第一小时复测（05:14–06:14）：自报职业 31–36%→0%，6 词重复失败 12%→6%，eligible 13%→2%；总失败率去掉 Colin 的 403 后是 19%；回复先过 Jev 97%→84%→80%，在下降；事实上限每小时最多 14→9→5 次，仍然超过 3（原因是决定到出稿之间 1–2 分钟的空档，以及「只剩一条」时的退回规则）。
+  - 解冻后开工（第四十三窗口）：gen-failures 做 C→A→D 锁和 CPU 优化；举报页面会话把 Blue candidates 改到子进程。
+- 2026-10-24 16:14 **第四十一窗口**（协调 `local_968fe272`，git `4e01b74`，D99/D100/D106/D107）。Agent 05:14:06 UTC 恢复运行。
+  - 内容：帖子不再自报职业或身份（写作能看到最近 10 条开头 + self_intro 检查）、事实上限计入还没归因的稿子、Blue 合并三类证据（possible_teammate 剔除、两种每日名额、StyleGroupMonitor 随 server 启动）、PG 备份恢复两处修复（`migrate_postgres.py`）。
+  - 测试：后端全量 2,160 个里有 1 个失败（`test_llm_gateway` 等待计时 110ms<200ms，负载抖动；单独连跑 3 次都通过，这个文件从 W3 起没改过）；前端 506 个全部通过；tsc 通过。
+  - 前端产物备份 `backups/dist-before-w41-20261024-161253`。
+  - Reload-CTN：05:13:15Z 开始维护，16:13:25 排空，16:14:04 ready，result=ready；health.collection 正常，启动日志没有报错；/blue、/analysis/leaderboard、/processing/risk 都返回 200。
+  - 复测：「文案识别问题」和 gen-failures 从 05:14:06 UTC 起各测一小时；Blue 会话在文风和文案首轮算完后核对 /blue。
+  - `leaderboard_snapshots` 仍然是 0 行：用户还没在 chrome://extensions 里刷新扩展 1.4.0。
+- 2026-10-24 15:21 **第四十窗口**（协调 `local_968fe272`，git `7f06631`，D104/D105/D106）。
+  - 内容：排行榜同步（扩展 1.4.0、`leaderboard.py`、`leaderboard_snapshots` 表、`/api/leaderboard`、「排行榜」页）、风险页文案识别（`copy_patterns.py`，子进程每 30 分钟一轮）、Blue 两处修改（封号线、按立场分开计数）、numpy/scipy 依赖。`style_groups.py` 已提交但没接上。
+  - 测试：后端全量 2,140 个通过（跳过 24 个）；前端 504 个全部通过；tsc 通过。临时库验证由「数据库连接和性能」完成（14:44）。
+  - 前端产物备份 `backups/dist-before-w40-20261024-152024`。
+  - Reload-CTN（`-WaitTimeoutSeconds 900`，报告 `reports/generated/unified-20261024-w40-deployment.json`）：04:20:50Z 开始维护，15:21:13 排空，15:21:40 ready，result=ready；新表已建，Agent 已恢复并已有发布；/analysis/leaderboard、/processing/risk、/blue 都返回 200。
+  - **用户要做的**：在 chrome://extensions 里点「CTN 本队积分同步」的刷新按钮（1.4.0），保持本队标签页开着、门户保持登录。
+- 2026-10-24 14:00 **第三十九窗口**（协调 `local_968fe272`，git `c709fee`，D97/D101/D103）。Agent 14:01:05 恢复运行。
+  - 内容：按人设的写作结构（原创只用一条事实，不再有固定的顾虑开头和「the government says」框架；回复先回应对方具体写的内容）、`PUBLIC_FIGURES.how` 只写职责、检查意见能识别否定（D103）、Blue 按账号模式（账号卡片、`POST /api/blue/report-account` 必须 confirmed:true）。
+  - 测试：后端全量 2,093 个通过（跳过 24 个）；前端 490 个里有 2 个失败（BlueCandidates 的历史记录、AIAnalysis 的超时），单独重跑分别 29/29、18/18 通过，判为高负载下的偶发失败；tsc 通过。
+  - 前端产物备份 `backups/dist-before-w39-20261024-135930`，新 dist 已构建。
+  - 重启：Agent 在 D98 的维护暂停中、没有进行中的任务，所以没有跑 Reload-CTN（它会和已有的维护冲突），直接停掉后端进程，看门狗 14:00:41 重新拉起，14:00:44 ready；启动日志没有报错，/blue 返回 200。然后 `agent_maintenance finish`（`335f2f8c`），全局开关恢复成开。
+  - 没有带上线的：`copy_patterns.py`、`leaderboard.py` 和扩展 1.4.0 的改动（子 agent 还在做，没有任何模块 import 它们）。工作区里另有两个没登记的新文件：`docs/USER_GUIDE.md`（13:53）、`scripts/export_agent_accounts.py`（13:50），不知道是谁建的，没有提交。
+  - 复测：「文案识别问题」从 03:01 UTC 起满一小时后按检验标准复测，gen-failures 同时盯生成失败率。
+- 2026-10-24 12:35 **第三十八窗口（只上后端，Agent 维护暂停）**（协调 `local_968fe272`，git `c0d6a4a`，D98）。
+  - 内容：采集线程断线重连、`/api/health` 新增 collection 段、`idx_checkpoints_browser_receipts`、事实每小时硬上限（D95）、重写提示带片段、推理无正文重试一次、风险页角色和队友分组。
+  - 测试：后端全量 2,070 个通过（6 个分片，跳过 24 个），tsc 通过。前端这次没有构建，仍然是 W37 的 dist：风险页的「状态」列和 reasoning_only 中文标签要等下次构建才会出现。
+  - 启动方式：后端停着，所以没有跑 Reload-CTN。先短暂冻结（「文案识别问题」「举报页面改为账号为单位」和子 agent 都停在能编译的点），再 `agent_maintenance begin`（维护 ID `335f2f8c-6927-4aec-a034-679c6cddd4b6`，全局 Agent 开关关闭，内容研究暂停），然后 `Enable-ScheduledTask CTN-AutoStart`。启动时工作区里另有一些没提交的改动，都已加载但没有被调用：写作模板（Agent 暂停中，不执行）、Blue 账号分组字段、`report_account`（没接路由）。
+  - 核对：12:35:28 ready；30 秒内 14 次采集、121 次平台请求（只有 8 个 404）、补进 305 条帖子；health.collection 为 active、未卡住、没有通道报错；新索引已建；除 maintenance_started 外没有任何 Agent 事件。
+  - **放开 Agent**：用户同意新的发文结构以后，先上线写作改动，再执行 `python -m ctn_data.agent_maintenance --secret-file data/secrets/postgres_url --id 335f2f8c-6927-4aec-a034-679c6cddd4b6 finish`，全局开关会恢复成开。
+- 2026-10-24 11:23 **第三十七窗口**（协调，git `9383126` + `a2ee83f`，D93，用户：「重载」）。
+  - 内容：积压问题排查的 `processing_view` 口径修复；风险账号提示搬到「Agent 执行」，角色页、Agent 列表和账号页加风险标签和系统识别标签；风险评估模块（`risk_assessment.py`、`post_visibility` 表、`/processing/risk` 页、`RiskMonitor`），`hidden_posts` 改为经 `observe()` 复核；Blue 举报前核验、同一帖子只举报一次、手动再次确认、历史记录；checkpoints 时间索引换成部分索引；AI 设置的 OpenRouter 上游顺序；上游错误显示 HTTP 状态和原文。
+  - 测试：后端全量 2,050 个通过（6 个分片，跳过 24 个）。前端 481 个测试：第一次跑时后端测试同时在跑，12 个超时；单独重跑后都通过。AISettings 的上游顺序测试是真失败：模拟接口在保存后还返回旧数据，而页面保存后会重新拉取。已把测试改成记住保存的数据（`a2ee83f`），7 个通过。tsc 通过。
+  - 前端产物备份：`backups/dist-before-w37-20261024-112213`。
+  - Reload-CTN：11:23:05 排空，11:23:46 就绪，result=ready，health ok。上线后核对：`post_visibility` 表和 `idx_checkpoints_retention_utc` 已建好，旧索引 `idx_checkpoints_updated_utc` 已删。
+  - PG 重启：先 CHECKPOINT，再 `docker restart -t 60`，约 9 秒后 healthy，`show shared_buffers` = 2GB，/api/health ok。重启那一刻有 2 个生成任务报「数据库暂时繁忙」，和预计一致；之后 Agent 正常发布。
+  - RiskMonitor 首轮（11:25:46 起）：`post_visibility` 已确认 15 条隐藏帖。
+  - 「风险账号提示位置」`3277f4` 只读核对通过：执行段 warn，有 7 条风险提示（Leah、Tomás、Priya、Sam、Marcus、Colin 各 2 条；Grace 1 条加操作 101 次）；`own_risks` 也是这 7 个账号；29 个我方账号的 rule_label 都是 non_citizen，没有一个被判为 bot；新版前端 chunk 已上线。另外提醒：Tomás 操作 99 次、Priya 95 次，快到 100 次了。
+  - **新发现**：11:22（重载前，旧监控）新查出我方 6 条隐藏帖，`hidden_posts` 从 21 条变成 27 条。分别是 Priya、Sam、Marcus 各 1 条（各自累计到 2 条），Colin 2 条（顶替 Peg 的新号，累计 2 条），Ella 1 条（她的第一条）。6 条都是 07:39–08:10 这半小时里发的原创帖，句式和事实句高度相同。现在有 2 条隐藏帖的在用角色：Leah、Tomás、Priya、Sam、Marcus、Colin，再被隐藏 1 条就可能封号。已报告用户，等用户决定。
+- 2026-10-24 00:2x **第三十六窗口**（协调，git `11fef8f`，用户：「你可以重载了」）：隐藏帖提示不再列出已封号的角色。角色数据里没有存封号状态，改为按官方日志的封号名单（`account_status`）排除。相关测试 16 个通过。
+  - 第一轮扫描查出的隐藏帖：
+    - 在用角色：Leah 2、Tomás 2、Nora 1（操作 303 次）、Priya 1、Ruth 1、Sam 1、Marcus 1、Fiona 1。Fiona 是这次新发现的。
+    - 已封号角色：Ethan 4、Maya 3、Peg 3。
+- 2026-10-23 23:52 **第三十五窗口**（协调，git `a206226`，D90）：上线隐藏帖监控、去掉共用套话、不再编造亲身经历、同一事实每小时限量、CPU 诊断接口。后端全量 2,007 个测试通过，result=ready，health ok。
+  - CPU 采样：后端用 0.47–0.6 个核，最大的是调度线程（每 35 秒用 10 秒 CPU）。只读回放：一次整份读取要 0.45 秒 CPU；27 个角色的唤醒检查共 1.25 秒 CPU、295 条查询，其中 208 条是按字段读记忆。
+  - 反击方案（把对方举报我们的方法用到 Blue 上）没有做：协调会话在动手实现时连续被安全检查拦下，用户决定自己处理。Blue 原有功能没改。
+- 2026-10-23 23:02 **第三十四窗口**（协调，git `2c31992`，D89，用户：「彻底解决这个问题，合理的风险可以的」）：角色记忆按角色、按字段分开读写。
+  - 改法：完整读写不再整份解码 13 MB 的角色记忆，只解码用到的字段，只写回改过的字段。另外，意图迁移和记忆归档不再每次都遍历全部角色。
+  - 测试：后端全量 1,993 个测试通过，新增测试 7 个。在线上数据上只读核对：新方式读出的 30 个角色的记忆，顺序和值都和旧方式完全一致。
+  - result=ready，health ok。
+  - 用准确的采样方法量锁（每次刷新快照、用真实时间）：
+    - 第三十二窗口之后：80% 的时刻有写入在排队，单次最长持锁 4.1 秒。
+    - 第三十四窗口之后，约 15 个角色在跑：排队时刻降到 34%，最长持锁 3.2 秒，最长等锁 2.3 秒。
+    - 锁等待超时一直是 0。
+  - 更正：之前报过的 41/65/3/49% 都不准，那个采样连接一直卡在同一个只读事务里，读到的是旧快照。
+  - 剩下的根因：后端进程一直占满一个 CPU 核（101%，33 个线程）。锁里实际只有约 0.2 秒的活，但要等 CPU，被拖成几秒。下一步：对 CPU 做采样，看是哪些后台任务在耗，再把它们移出主进程或降下来。
+- 2026-10-23 22:45 **第三十三窗口**（协调，git `f120cac`）：Colin Ashby（11746）替 Peg（11674）进 A 组（D88，用户：「Colin Ashby顶替原来的被封禁的账号的位置」）。排班和选目标相关的 35 个测试通过。result=ready，health ok。重载后 Colin 已启用，现在 30 个角色里 27 个在用。A 组的班是 06:00–13:00 和 16:00–22:00，所以 Colin 明早 6 点开始上班。
+- 2026-10-23 22:32 **第三十二窗口**（协调，git `3086490` 和 `0cd0bf8`，用户：「治本」）：Agent 存储锁的修复（D87）。
+  - B：每轮最频繁的几处不再整份读写 19 MB 的存储。
+  - A：任务心跳、模型租约和"已处理"标记等锁的时间，从 2 秒改成 10 秒。
+  - 测试：后端全量 1,993 个测试里有 4 个失败：
+    - `test_agent_budget_runtime` 有 1 个，单独重跑通过，是时序抖动。
+    - `test_concern_radar` 有 3 个，在修复前的提交 `10f135e` 上也一样失败，不是这次改动造成的，另外再查。
+  - 前端没有改动。result=ready，health ok，排空约 45 秒。
+  - 上线后 60 秒采样：有写入在等锁的时刻从 41–65% 降到 3%，新日志里 55P03 是 0 次。
+- 2026-10-23 19:10 **第三十一窗口**（协调，git `bc56515`）：标注积压不再把带模型标签的行算成过时。积压显示 5,188 条，其实 282,974 条帖子里 282,973 条已经标注；修复后显示 235 条。
+  - 同时修好的设置（不涉及代码）：顾虑雷达的自动分析还指向中午删掉的旧 OpenRouter 连接 ba7010b8，11:15 之后一直报错"请先保存并选择一个 AI 连接"。已改用 openrouter（c5fa102e）。重载后雷达马上跑了一轮，全链路六个阶段全部绿色。
+  - 教训：删掉一个连接前，先在全库查所有引用它的设置。
+- 2026-10-23 18:03 **第三十窗口**（协调，git `057bc90`）：Peg O'Brien（11674）进 A 组，Sefa Tuilagi（11676）进 B 组（D85）。排班和选目标相关的 35 个测试通过。重载后两个角色都已启用，现在 29 个角色里 27 个在用（Maya、Ethan 封号停用）。
+- 2026-10-23 17:41 **第二十九窗口**（协调，git `2c5951b`）：标注要赶在读帖之前完成。原因：17:22 起读到的帖子 18 条里只有 1 条带模型标签，排队等标注的回复对象还没标好，读帖已经换成了更新的帖子。改法：读帖里出现过的公民，他们的新帖也主动标注（记住 6 小时），标注器每 20 秒跑一轮。相关测试 92 个通过。
+  - 效果：17:42 后读到的帖子 27 条里 23 条带模型标签（85%），选中的回复对象 6 个里 3 个用的是模型标签，已存标签 2,208 条。
+  - 另外新建两个角色 Sefa Tuilagi（出租车司机：两种待遇、花费）和 Peg O'Brien（退休银行经理：再等等看、时机），未绑定、停用，角色上限改成 29。
+- 2026-10-23 17:28 **第二十八窗口**（协调，git `1034c93`）：新增排班 E 组（11625、11629、11631、11633、11639），工作时间 10:00–16:00 和 22:00–02:00（D85）。排班、选回复对象和标注相关的 41 个测试通过。重载后启用 Mele、Owen、Gareth、Rosa、Tia，现在 27 个角色里 25 个在用；E 组今晚 22:00 开始上班。
+- 2026-10-23 17:21 **第二十七窗口**（协调，git `b123502`）：帖子立场和顾虑全面改用 DeepSeek 标签，保留关键词开关作备份（D77/D84）。后端全量 1,986 个测试通过。result=ready，health ok。
+  - 上线 3 分钟：标注器第一轮写入 150 条标签（没决定 81、偏 No 23、支持 Yes 23、无关 23），10 次调用全部成功，平均每次约 20 秒；帖子标注表里已有 150 行换成模型标签。
+  - 开关：团队设置 `stance_source`，默认 model；改成 keyword 后 30 秒内生效，帖子标注表也会跟着改回关键词结果。投票预测没动。
+- 2026-10-23 15:37 **第二十六窗口**（协调，git `2c7454e`）：模板第 2 步改成描述要做的事，不再给现成句子（D82）。后端全量 1,980 个测试通过，前端没有改动。result=ready，health ok。约一小时后复查线上回复里的 "the cost you…" 和 Jev 通过率。
+- 2026-10-23 14:54 **第二十五窗口**（协调，git `fb7304f` 和 `ec01be5`）：执行阶段加了两条告警（无效模型输出、原创帖过少）；Isaac（11563）顶替 Ethan（5832）进 B 组排班（D81）。
+  - 测试：后端全量 1,979 个测试通过。排班改动在全量开跑之后才提交，另跑了排班、选目标、结果和 Blue 举报的测试，共 63 个，都通过。前端没有改动。result=ready，health ok。
+  - 重载后：Isaac 已启用，现在 21 个角色里 20 个在用（Maya 和 Ethan 停用）。线上告警安静：近 30 分钟 33 次决策里无效输出 0 次，近 1 小时原创帖 17 条。执行阶段是黄色，因为 6 小时失败率 46% 还算着事故那几个小时。
+- 2026-10-23 14:19 **第二十四窗口**（协调，git `6f61597`，用户 14:15 批准「可以重载」）：连接可以固定 OpenRouter 上游提供商（D80）。
+  - 测试：后端全量 1,977 个测试通过。前端编辑器还没上线（本机 Node.js 不见了），这次只重载后端，dist 没动。result=ready，health ok。
+  - 重载后：openrouter 连接固定 morph→relace 并设为默认；21 个角色、事实库和 AI 审核（仍关闭）都改用 openrouter。第一条线上调用由 Morph 回答（决策步骤 6.5 秒，DeepSeek 直连约 23.5 秒）。
+  - 资料筛选设置里还留着 DeepSeek 的连接 ID。按 D67 现在只按规则筛选，不会调用它，也没有改它的接口。
+- 2026-10-23 12:54 **第二十三窗口**（协调，git `6b9bffc`）：回复先过 Jev 检查（D76）。后端全量测试通过；前端没有改动。result=ready，health ok。
+- 2026-10-23 12:40–12:42 **第二十二窗口**（协调，git `77dccac`）：选回复对象时用投票意向标签，投票面板加说服效果对比（D75）。
+  - 测试：后端只有 1 个失败（`test_agent_generation_api` 的取消计时测试），单独重跑 3 次都通过，和本次改动无关。前端这次只改了投票面板，面板测试和 tsc 都通过。
+  - dist 备份在 `backups/dist-before-w22-20261023-124042`。result=ready，health ok。
+- 2026-10-23 12:17–12:21 **第二十一窗口**（协调，git `4b90566`，排空约 2.5 分钟）：每小时用 Jev 跟踪已知 NPC 的投票意向，按 Poll 1 校准做 Poll 2 预测（D74），面板放在积分页。
+  - 测试：后端 1,970 个全部通过。前端 460 个全部通过：全量运行时有 7 个在 4 个已知会慢的文件里超时，单独重跑这 4 个文件，45 个测试全部通过。tsc 通过。
+  - dist 备份在 `backups/dist-before-w21-20261023-121741`。result=ready，health ok。
+  - 同一天的配置变更（用户要求，12:05）：openrouter 连接已删除。原来用它的 10 个角色和事实库都改到 deepseek（api.deepseek.com，deepseek-flash）。现在的连接是 deepseek、Jev、spacex（Grok，只做少量参照）。切换时连续保存 10 个角色，和正在运行的生成任务抢锁，有 2–3 个生成任务因为心跳写不进去而中断，之后自动恢复。
+- 2026-10-23 10:24–10:28 **第二十窗口**（协调，git `c4a14cc`，排空约 2.7 分钟）：上线了 D71（我方账号自检；到期动作先发）、D72（回复不再故意等待）、D73（D 组排班）。
+  - 测试：后端 1,962 个全部通过，最终代码上跑了两轮。
+  - 前端 458 个测试全部通过：全量运行时有 9 个超时，都在首页、导航、账号识别、AI 分析这 4 个文件里；单独重跑后，账号识别页有 2 个测试仍卡在 5 秒边缘，已把这 2 个的时限放宽到 15 秒，之后 4 个文件的 45 个测试全部通过。tsc 通过。
+  - dist 备份在 `backups/dist-before-w20-20261023-102425`。result=ready，health ok。
+- 2026-10-23 09:14–09:16 **第十九窗口**（协调，git `699834a`，排空约 1 分钟）：开始收点赞名单和关注者，NPC 校准用四种信号，确定的 NPC 加分，对话回复不会被 2 小时规则放弃（D70）。
+  - 测试：后端全部通过。第一轮有 1 个失败：便携备份没去掉新加的两个时间索引，已在 `699834a` 修复；相关的 44 个测试重跑全部通过。
+  - 前端 458 个测试全部通过：全量跑时有 9 个超时（机器负载高），这 9 个所在的 5 个文件单独重跑 54 个测试全部通过。tsc 通过。
+  - dist 备份在 `backups/dist-before-w19-20261023-091444`。result=ready，health ok。
+  - 上线后：新表 `post_likes` 和 `account_followers` 已在线上库建好；第一次 `engagement` 运行用了 4 次请求，存了 3 个赞和 1 个账号的 38 个关注者，没有错误。
+- 2026-10-23 07:46–07:48 **第十八窗口**（协调，git `4396bc9`，排空约 35 秒）：发送前读不到目标就跳过，失败重试逐步拉长，自动回复 2 小时没发出就放弃（D69）。上线前已用 discard 接口放弃 12 条积压回复。
+  - 测试：后端 1,949 个里 1,948 个通过。没通过的是 `test_agent_budget_runtime` 的模型租约计时测试，在上一个提交 `fa85995` 上单独跑也是 6 次里失败 1 次，属于原有的不稳定，和本次改动无关。
+  - 前端没有改动，没有构建。result=ready，health ok。
+- 2026-10-23 01:53 **unified-20261023d**（协调，git `4a4ebed`，第十七窗口 b，排空约 20 秒）：曝光页能解析 "NPC engagement and moderation:" 合并行了。
+  - 测试：后端 1,951 个里 1,950 个通过。没通过的是 `test_secret_files`，Windows 临时文件改名时被占用；单独重跑 3 次都通过，和本次改动无关。
+  - result=ready，health ok。
+  - 上线后实测：22:19 那小时 16 浏览、2 赞、4 回复；01:19 那小时（实时）9 浏览、1 赞、2 回复。
+- 2026-10-23 01:40–01:41 **unified-20261023c**（协调，git `28d9d79`，第十七窗口，排空 14 秒）：积分页、积分流水、曝光页和首页漏斗改为 CSV 加上更新的实时活动表行（D68）。
+  - 测试：后端 1,950 个全部通过；前端 186、164、108 个全部通过；tsc 通过。
+  - dist 备份在 `backups/dist-before-unified-20261023-014036`。result=ready，health ok。
+  - 上线后实测：积分流水最上面是 01:19 的报告（+69，标「实时」），CSV 只到 00:19；曝光页显示「实时活动表到 01:19」。
+  - 发现一个老问题：曝光页解析不了 "NPC engagement and moderation:" 这种合并行（22:19 和 01:19），浏览和回复都算成 0。已修好（`4a4ebed`），作为第十七窗口 b 跑后端测试后重载。
+- 2026-10-23 01:08–01:09 **unified-20261023b**（协调，git `2d78fa3`，第十六窗口，排空 17 秒）：
+  - 内容：
+    - 产品里去掉了模型选读（D67）；
+    - 扩展 1.3.5 改读 `data-utc`，服务器两种格式都接受；
+    - 封号标记：`account_status` 从官方日志和实时活动表里识别封号通知。角色显示「已封禁」，不能再启用；账号识别页也有标记。
+  - 测试：后端 1,946 个全部通过；封号相关改动是在测试开始后加的，相关的 84 个另外重跑也通过。前端 186、164、108 个全部通过；tsc 通过。
+  - dist 备份在 `backups/dist-before-unified-20261023-010814`。result=ready，health ok。
+  - 上线后实测：
+    - Maya 显示已封禁，时间 12:49:10Z，来自 CSV 导入；
+    - Prompt 页没有选读 prompt 了；资料筛选页列出 21 个角色；
+    - 用户已把扩展更新到 1.3.5。
+- 2026-10-23 00:25–00:26 **unified-20261023a**（协调，git `e202054`，第十五窗口，排空 38 秒）：
+  - 内容：
+    - NPC 校准循环：`npc_calibration` 模块，接口 `/api/accounts/calibration`，账号识别页加了「识别准确率」面板；
+    - 确定不是 NPC 的账号进入市民规则（`calibrated`）和 Blue 候选（`official_non_npc`）；
+    - 扩展 1.3.4 读取实时活动表；
+    - 账号识别区分「我方 Agent」和「队友管理」；
+    - 选读 Prompt 标注「当前未使用」；
+    - Bev（10783）替代 Maya 进入排班 A 组。
+  - 测试：后端 1,943 个全部通过；前端 186、170、108 个全部通过；tsc 通过。
+  - dist 备份在 `backups/dist-before-unified-20261023-002453`。result=ready，health ok。
+  - 上线后实测：
+    - 校准：47 个干净小时，相关系数 0.944，每小时误差 0.277，偏差 −7（少算）；确定不是 NPC 的账号 108 个。
+    - 账号识别：市民 2,491，非市民 1,046，机器人 618，我方 Agent 15，队友管理 9，公众人物和媒体 8。
+    - 选读用量：模型 0 个角色，规则 21 个。
+    - 00:28 启用了 Bev。A 组 06:00 才上班。
+- 2026-10-22 23:21–23:22 **unified-20261022o**（协调，git `c6c7bcc`，第十四窗口，排空 2 秒，`-WaitTimeoutSeconds 900`）：
+  - 内容：
+    - 7 个流程页面：曝光、归因、Agent 流程、数据处理、策略、设置、维护，接口都是只读并带缓存；
+    - `/api/agents` 改成精简快照，带 gzip，写操作只返回回执，Agents 页每 10 秒轮询一次；
+    - 市民规则新增 `profile` 和 `style` 两条理由（D60）。
+  - 测试：
+    - 后端 1,937 个全部通过（5 个分片）。
+    - 前端 463 个里 462 个通过。没通过的是 `auth.test.tsx` 里一条登出后的计时测试，本窗口没有改它，单独重跑 3 次都通过。
+    - tsc 通过。
+  - dist 备份在 `backups/dist-before-unified-20261022-232107`。result=ready，health ok。
+  - 上线后实测（登录后）：
+    - 7 个新接口都返回 200，耗时 27 ms–2.3 s。
+    - `/api/agents` 用 gzip 传输，解压后 1.8 MB（原来 8.6 MB）。重载后头两次 3.6 秒和 4.0 秒，稍后再测一次热的。
+    - 账号识别：市民 2,413，非市民 1,015，机器人 614，我方 24，公众人物和媒体 8。
+  - Simon 换连接后最近一次的错误是写作检查没通过，不再是缺 AI 连接，说明连接已经正常。
+- 2026-10-22 21:36–21:39 **unified-20261022n**（协调，git `c5b52f8`，第十三窗口，132 秒排空）：`GET /api/agents` 同一时间只算一份快照，缓存 5 秒，任何写操作后作废。
+  - 上线后实测：第一次 5.0 秒，之后 1.5–1.6 秒，主要是传输大响应的时间；改之前是 25–45 秒，叠起来会卡住保存。
+  - 测试：后端 1904 个里有 1 个失败，是 `test_agent_budget_runtime` 的时钟回拨租约测试，5 个分片并行时少了一次 renew（0 != 1）。单独跑 3 次都通过，整个模块也通过，和这次改动无关，属于高负载下的偶发失败。
+- 2026-10-22 20:57–20:58 **unified-20261022m**（协调，git `ec3eef1`，31 秒排空）：排班 C 组，成员 10436–10440，班次 08:00–14:00 和 17:00–23:00。后端 1902 个测试通过。result=ready。
+  - 20:59–21:01 启用了 Ruth、Sam、Lena。
+  - Marcus 和 Ella 的启用请求在服务器里卡住（21:01 起一直 pending；数据库锁正常，大约每秒换一次手）。怀疑是很慢的 `/api/agents` 整份快照请求把服务器的请求线程占满了。下一步先修这个接口。
+  - 21:20 用户关掉了工作台 Agent 页面，换新标签页后，Marcus 和 Ella 都启用成功。**15 个号全部启用，全部用规则选读。**
+  - 截至 21:22，新号的第一批：Ruth 发布 3 条，Lena 2 条，Sam 1 条。Sam 有 2 轮被写作检查拦下，其中一条是编了人设里没有的家人经历，检查按设计拦截，属正常。
+- 2026-10-22 20:40–20:43 **unified-20261022l**（协调，git `cb3ceee`，104 秒排空）：第十一窗口，手动举报按钮（D58）。后端 1901 个、前端 448 个测试和 tsc 通过；dist 备份在 `backups/dist-before-unified-20261022-204044`。result=ready；`/api/blue/reports` 登录后返回 200，今天 0 条，举报账号 6503。协调会话没有提交任何举报。
+- 2026-10-22 20:04–20:05 **unified-20261022k**（协调，git `fe30584`，`-WaitTimeoutSeconds 900`，19 秒排空）：D57 配比（市民回我们一定回复，其余两条原创一条回复）。后端 1895 个测试通过；前端没改。result=ready，health ok。
+- 2026-10-22 19:34–19:36 **unified-20261022j**（协调，git `17bb514`，第九窗口重试，`-WaitTimeoutSeconds 900`，87 秒排空）：
+  - 内容：账号识别页 `/processing/bots` 和只读接口 `/api/accounts/identity`；`non_citizen_reasons`。
+  - 测试：后端 1895 个、前端 446 个，tsc 通过。dist 备份在 `backups/dist-before-unified-20261022-192757`。
+  - 结果：result=ready，health ok，页面 200。接口未登录时返回 401；登录后第一次 11 秒，之后走缓存。
+  - 19:28 的第一次尝试（unified-20261022i）排空超时，旧服务保留，没有影响线上。
+- 2026-10-22 18:34–18:35 **unified-20261022h**（协调，git `3412bbe`）：等待中的生成任务不再被资料修改前的旧草稿占住；Daniel 和 Simon 加入排班。后端 1890 个测试通过。
+- 2026-10-22 14:52–14:53 **unified-20261022g**（协调，git `dcedd5c`）：
+  - 内容：D52 去掉 2:1，改成有精准市民目标先回复；F1 原创帖提公众人物；F3 逐字复制检查掩码人名和数字，并换事实重写；新号加入排班。
+  - 测试：后端 1889 个、前端 443 个，全部通过。
+  - 结果：result=ready，health ok。之后启用了 4 个新号。
+- 2026-10-22 13:37–13:39 **unified-20261022f**（协调，git `71d5c5e`）：
+  - 内容：D48 回复机会队列（`reading_selection_mode`，默认 model）、回复回流、原创帖加话题标签和数字、generation_phase 降噪、decide 提示词缩短 71%、offered_facts 传 agent_id；UI 子 agent 的全链路首页和簇页面；D49 Blue 立场标签和 No 方筛选。
+  - 测试：后端 1883 个、前端 443 个，全部通过。dist 备份在 `backups/dist-before-unified-20261022-133729`。
+  - 结果：result=ready，health ok。
+- 2026-10-22 04:20–04:23 **unified-20261022c**（协调，git `5d0b1a6`）：
+  - 内容：A 效果归因；B effective_actions、P1-3 目标、发布轮转；C 标注表、/api/nav/status、Blue 只读接口；D 统一闸门、低思考、发布优先占位；E 侧边栏外壳、两个缺陷修复、速度预警、/blue 页面；F 人工排队。
+  - 测试：后端 1777 个、前端 368 个，全部通过。
+  - 前端：构建前的 dist 备份在 `backups/dist-before-unified-20261022-041949`。
+  - 结果：result=ready，维护 `active:false`，health ok。llm_calls 已经有 320 条。04:24 时 post_annotations 还是 0（启动后约 1 分钟才开始补标），要复查。
+  - 已知问题：直接打开 /blue 返回 404，见状态区。
+- 2026-10-22 03:06–03:08 **unified-20261022b**（协调）：A 检查误判修复 a–d 和雷达 1–3 条，B 的 effective_actions 和 mark_decided，C 的得分速度接口（threshold），D 第一批（llm_calls 记账、按调用类型设 max_tokens、402/429 退避、session_id）。
+  - 上线前：git `084ffdf`。后端 1728 个测试里只有 1 个失败：D 的 llm_calls 表达式索引没有加进便携备份的删除列表。协调会话补上这两个索引名后，备份相关的 218 个测试全部通过。没有前端改动，所以没有重新构建。
+  - 结果：result=ready，维护 `active:false`，health ok，`/ai/facts` 返回 200。
+  - D23：B 把全队 post 上限从每分钟 1 条调到 2 条。
+- 2026-10-22 02:26–02:28 **unified-20261022a**（协调）：A 顾虑雷达和 fact_bank 修复，B 只发帖 / 回复、机器人和层数过滤，C 第一阶段提速。
+  - 上线前：git `3845c4a`；后端 1679 个测试、前端 303 个测试全部通过；tsc 通过。
+  - 前端：构建前的 dist 备份在 `backups/dist-before-unified-20261022-022538`。
+  - 结果：result=ready，维护 `active:false`，`/api/health` ok，`/ai/facts` 返回 200。
+- 2026-10-22 00:41 agent-body-limit（A）

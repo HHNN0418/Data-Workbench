@@ -1,0 +1,107 @@
+name: ctn
+
+x-vpn: &vpn
+  image: qmcgaw/gluetun:v3.41.3
+  restart: unless-stopped
+  cap_add: [NET_ADMIN]
+  devices: [/dev/net/tun:/dev/net/tun]
+  secrets: [nord_username, nord_password, gluetun_control]
+  networks: [proxy]
+  healthcheck:
+    test: [CMD, /gluetun-entrypoint, healthcheck]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+
+x-vpn-env: &vpn-env
+  VPN_SERVICE_PROVIDER: nordvpn
+  VPN_TYPE: openvpn
+  OPENVPN_PROTOCOL: udp
+  OPENVPN_USER_SECRETFILE: /run/secrets/nord_username
+  OPENVPN_PASSWORD_SECRETFILE: /run/secrets/nord_password
+  HTTPPROXY: 'on'
+  HTTPPROXY_LOG: 'off'
+  HTTPPROXY_LISTENING_ADDRESS: ':8888'
+  HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /run/secrets/gluetun_control
+  UPDATER_PERIOD: 480h
+  FIREWALL_INPUT_PORTS: '8888,8000'
+  TZ: Australia/Sydney
+
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: docker/worker.Dockerfile
+  image: ctn-proxy-worker:local
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  secrets: [worker_token]
+  networks: [proxy]
+  extra_hosts: ['host.docker.internal:host-gateway']
+  healthcheck:
+    test: [CMD, python, -c, "import pathlib,time; p=pathlib.Path('/state/heartbeat'); assert p.exists() and time.time()-float(p.read_text())<90"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 30s
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+
+services:
+  gluetun-au-a:
+    <<: *vpn
+    environment:
+      <<: *vpn-env
+      SERVER_COUNTRIES: Australia
+      SERVER_HOSTNAMES: au1012.nordvpn.com
+    volumes: ['./data/gluetun-au-a:/gluetun']
+    ports: ['127.0.0.1:18881:8888', '127.0.0.1:18001:8000']
+  gluetun-au-b:
+    <<: *vpn
+    environment:
+      <<: *vpn-env
+      SERVER_COUNTRIES: Australia
+      SERVER_HOSTNAMES: au753.nordvpn.com
+    volumes: ['./data/gluetun-au-b:/gluetun']
+    ports: ['127.0.0.1:18882:8888', '127.0.0.1:18002:8000']
+  worker-au-a:
+    <<: *worker
+    depends_on:
+      gluetun-au-a: {condition: service_healthy}
+    environment:
+      CTN_BACKEND: http://host.docker.internal:8765
+      CTN_PROXY: http://gluetun-au-a:8888
+      CTN_WORKER_ID: docker-au-a
+    volumes: [worker_au_a_state:/state]
+  worker-au-b:
+    <<: *worker
+    depends_on:
+      gluetun-au-b: {condition: service_healthy}
+    environment:
+      CTN_BACKEND: http://host.docker.internal:8765
+      CTN_PROXY: http://gluetun-au-b:8888
+      CTN_WORKER_ID: docker-au-b
+    volumes: [worker_au_b_state:/state]
+
+networks:
+  proxy:
+volumes:
+  worker_au_a_state:
+  worker_au_b_state:
+secrets:
+  nord_username:
+    file: ./data/runtime-secrets/nord_username
+  nord_password:
+    file: ./data/runtime-secrets/nord_password
+  worker_token:
+    file: ./data/runtime-secrets/worker_token
+  gluetun_control:
+    file: ./data/runtime-secrets/gluetun-control.toml

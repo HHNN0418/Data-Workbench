@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctn-data"
+version = "2.0.0"
+description = "Read-only CTN collection, SQLite provenance, score reconciliation and analytics"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "tzdata>=2025.1", "psycopg[binary]>=3.2,<4", "capturethenarrative==0.5.1",
+                "numpy>=2.5,<3", "scipy>=1.18,<2"]
+
+[project.optional-dependencies]
+test = ["httpx>=0.27,<1"]
+
+[project.scripts]
+ctn-data = "ctn_data.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ctn_data*"]
+
+[tool.setuptools.data-files]
+"share/ctn-data/frontend" = ["frontend/dist/index.html"]
+"share/ctn-data/frontend/assets" = ["frontend/dist/assets/*"]

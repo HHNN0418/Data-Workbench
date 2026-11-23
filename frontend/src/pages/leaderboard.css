@@ -1,0 +1,7 @@
+.board-own>td{background:var(--brand-weak)!important}
+.board-team{display:inline-flex;align-items:center;gap:6px;overflow-wrap:anywhere}
+.board-up{color:var(--ok,#26705b)}
+.board-down{color:var(--danger,#b4232c)}
+.board-rank{margin-left:6px;font-size:var(--font-12)}
+.board-picker{width:100%;margin-bottom:var(--space-8)}
+.board-note{margin:var(--space-8) 0 0;font-size:var(--font-12)}

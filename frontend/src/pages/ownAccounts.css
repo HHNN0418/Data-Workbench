@@ -1,0 +1,4 @@
+/* Our accounts' suspension risk and identification verdict (ownAccounts.tsx). */
+.own-risk-list,.own-identity-reasons{margin:0 0 4px;padding-left:18px}
+.own-identity-reasons{font-size:var(--font-12);color:var(--text-2)}
+.own-identity p{margin:6px 0}

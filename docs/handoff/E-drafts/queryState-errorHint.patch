@@ -1,0 +1,30 @@
+--- a/frontend/src/common.tsx  (S2: reverted before the 4th window because the full suite had not run; re-apply and run the full suite)
++++ b/frontend/src/common.tsx
+@@ imports
+-import {Alert, Button, Empty, Skeleton, Table, Tag} from 'antd';
++import {Link} from 'react-router-dom';
++import {Alert, Button, Empty, Skeleton, Space, Table, Tag} from 'antd';
+@@ after `import {labels} from './labels';`
++import {errorHint} from './ui/layout';
+@@ QueryState
+-export function QueryState<T>(...) {if(query.isPending)return <Skeleton .../>;if(query.isError)return <Alert type="error" showIcon title="读取失败" description={query.error?.message} action={<Button onClick={()=>query.refetch()}>重试</Button>}/>;if(query.data===undefined)return <Empty/>;return <>{children(query.data)}</>}
++export function QueryState<T>({query,children}:{...same props...}) {
++ if(query.isPending)return <Skeleton active paragraph={{rows:5}}/>;
++ if(query.isError){
++  // Every failure says what to try next (docs/UX_IA_PLAN.md §4.5).
++  const hint=errorHint(query.error);
++  return <Alert type="error" showIcon title={hint.title} description={hint.description} action={<Space wrap><Button onClick={()=>query.refetch()}>重试</Button>{hint.action&&(hint.action.to?<Link to={hint.action.to}>{hint.action.label}</Link>:<Button onClick={hint.action.onClick}>{hint.action.label}</Button>)}</Space>}/>;
++ }
++ if(query.data===undefined)return <Empty/>;
++ return <>{children(query.data)}</>;
++}
+Test to add back to ui/components.test.tsx (needs `import {QueryState} from '../common'`):
+ it('shows the hint and a retry in the shared query state',()=>{
+  const refetch=vi.fn();
+  render(<MemoryRouter><QueryState query={{isPending:false,isError:true,error:new Error('请求失败 (504)'),data:undefined,refetch}}>{()=>null}</QueryState></MemoryRouter>);
+  expect(screen.getByText('后端暂时没有响应')).toBeTruthy();
+  expect(screen.getByRole('link',{name:'查看采集与运行'}).getAttribute('href')).toBe('/operations');
+  fireEvent.click(screen.getByRole('button',{name:/重\s*试/}));
+  expect(refetch).toHaveBeenCalled();
+ });
+Risk: QueryState now renders <Link> for 502/504/network errors, so any page test that renders QueryState outside a Router with such an error would throw. Run the full suite after applying.

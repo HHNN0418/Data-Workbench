@@ -1,0 +1,67 @@
+.shell{display:flex;min-height:100vh}
+.shell-sidebar{position:sticky;top:0;height:100vh;width:var(--sidebar-width);flex:none;overflow-y:auto;background:var(--bg-panel);border-right:1px solid var(--border);padding:18px 12px 24px}
+.shell-sidebar>.brand{padding:0 8px 16px;border-bottom:1px solid var(--border-weak)}
+.brand{display:flex;align-items:center;gap:12px;color:var(--text);font-weight:600;font-size:var(--font-14)}
+.brand-mark{font-family:Georgia,serif;font-size:34px;letter-spacing:-4px;line-height:1;padding-right:4px}
+.brand-mark span{color:var(--brand)}
+.brand-name{display:flex;flex-direction:column}
+.brand-name small{font-size:9px;letter-spacing:1.4px;font-weight:500;margin-top:3px;color:var(--text-3)}
+.sidebar-group{margin-top:16px}
+.sidebar-group-label{font-size:var(--font-12);font-weight:600;color:var(--text-3);padding:0 10px 4px}
+.sidebar-step{display:inline-block;min-width:18px}
+.sidebar-group-toggle{display:flex;align-items:center;gap:0;width:100%;background:none;border:0;cursor:pointer;font-family:inherit;text-align:left}
+.sidebar-group-toggle .anticon{margin-left:auto;font-size:10px}
+.sidebar-group-toggle:hover{color:var(--brand)}
+.sidebar-group-overview{margin-top:12px}
+.sidebar-nav ul{list-style:none;margin:0;padding:0}
+.sidebar-nav a{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-radius:var(--radius-control);color:var(--text-2);font-size:var(--font-14);line-height:22px}
+.sidebar-nav a:hover{background:var(--bg-sunken);color:var(--brand)}
+.sidebar-nav a.active{background:var(--brand-weak);color:var(--brand);font-weight:600}
+.sidebar-nav a .anticon{font-size:11px;color:var(--text-3)}
+.shell-body{flex:1;min-width:0;display:flex;flex-direction:column}
+.shell-header{position:sticky;top:0;z-index:10;height:60px;display:flex;align-items:center;gap:12px;padding:0 32px;background:var(--bg);border-bottom:1px solid var(--border-weak)}
+.shell-header-brand{display:none}
+.shell-menu-button.ant-btn{display:none}
+.shell-header-actions{margin-left:auto;display:flex;align-items:center;gap:16px}
+.shell-body>main{width:100%;max-width:1440px;margin:0 auto;padding:20px 32px 64px;flex:1}
+.breadcrumbs ol{display:flex;flex-wrap:wrap;gap:6px;list-style:none;margin:0 0 6px;padding:0;font-size:var(--font-12);color:var(--text-3)}
+.breadcrumbs li+li::before{content:'/';margin-right:6px;color:var(--border)}
+.breadcrumbs a{color:var(--text-3)}
+.breadcrumbs a:hover{color:var(--brand)}
+.breadcrumbs [aria-current=page]{color:var(--text-2)}
+.shell-title{font-size:var(--font-20);letter-spacing:-.3px;font-weight:650;line-height:1.4;margin:0 0 20px}
+.shell-footer{display:flex;gap:24px;padding:16px 32px;border-top:1px solid var(--border-weak);color:var(--text-3);font-size:var(--font-12)}
+.shell-footer span:first-child{margin-right:auto}
+.shell-drawer .ant-drawer-body{padding:4px 12px 16px}
+.not-found{padding:48px 0}
+.not-found h1{font-size:var(--font-20);margin-bottom:8px}
+.not-found-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:24px;margin-top:24px}
+.not-found-groups h2{font-size:var(--font-14);color:var(--text-3);margin-bottom:8px}
+.not-found-groups ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+
+@media(max-width:1199px){
+ .shell-header{padding:0 24px}
+ .shell-body>main{padding:20px 24px 56px}
+ .shell-footer{padding:16px 24px}
+}
+@media(max-width:767px){
+ .shell-sidebar{display:none}
+ .shell-menu-button.ant-btn{display:inline-flex}
+ .shell-header{padding:0 12px;gap:4px}
+ .shell-header-brand{display:block}
+ .shell-header-brand .brand-mark{font-size:28px}
+ /* At phone width the header holds the menu, mark, refresh and account; the brand name wrapped onto two lines. */
+ .shell-header-brand .brand-name{display:none}
+ /* Alert actions sat beside the text and squeezed it into a narrow column; put them underneath. */
+ .shell-body .ant-alert{flex-wrap:wrap}
+ .shell-body .ant-alert-actions{margin-inline-start:0;margin-top:8px;flex-basis:100%;padding-inline-start:28px}
+ .shell-header-actions{gap:8px}
+ .shell-body>main{padding:16px 16px 40px}
+ .shell-footer{padding:16px;flex-wrap:wrap;gap:8px}
+ .shell-footer span:first-child{width:100%}
+}
+/* Stage health dots (PIPELINE_UI_SPEC §2), coloured by /api/pipeline/status. */
+.sidebar-dot{display:inline-block;flex:none;width:8px;height:8px;margin-left:6px;border-radius:50%;background:var(--neutral);vertical-align:middle}
+.sidebar-dot[data-status=ok]{background:var(--ok)}
+.sidebar-dot[data-status=warn]{background:var(--warn)}
+.sidebar-dot[data-status=bad]{background:var(--danger)}

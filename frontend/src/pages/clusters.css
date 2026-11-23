@@ -1,0 +1,14 @@
+.cluster-own>td{background:var(--brand-weak)!important}
+.cluster-name{display:flex;flex-direction:column;gap:2px}
+.cluster-name .ant-tag{align-self:flex-start}
+.cluster-detail{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:var(--space-24);padding:var(--space-8) 0}
+.cluster-detail section{min-width:0}
+.cluster-detail h3{font-size:var(--font-13);font-weight:600;margin:0 0 var(--space-8)}
+.cluster-detail p{margin:0 0 var(--space-4);line-height:1.6}
+.cluster-detail ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:var(--font-13)}
+.cluster-member{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.cluster-excerpt{display:block;color:var(--text-2);overflow-wrap:anywhere}
+.cluster-more.ant-btn{padding:0;margin-top:var(--space-4)}
+.cluster-hours{display:block;width:100%;max-width:280px;height:32px;margin-top:var(--space-8);background:var(--bg-sunken);border-radius:4px}
+.cluster-hours rect{fill:var(--brand)}
+.cluster-method{margin:0;padding-left:18px;font-size:var(--font-12);color:var(--text-2)}

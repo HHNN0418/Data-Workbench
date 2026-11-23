@@ -1,0 +1,97 @@
+import {useEffect, useRef, useState} from 'react';
+import {Link, useNavigate, useSearchParams} from 'react-router-dom';
+import {Alert, Button, Collapse, Empty, Form, Input, Pagination, Select, Space, Switch, Table, Tabs, Tag, Typography} from 'antd';
+import {useAction, useApi, type Row} from '../api';
+import {useAIJob} from '../useAIJob';
+import AIJobStatus from '../AIJobStatus';
+import {fmt, time} from '../common';
+import AccountScreening from './AccountScreening';
+import ContentResearch from './ContentResearch';
+import {providerReady, type Provider, type Settings} from './aiProviders';
+import './aiAnalysis.css';
+
+type Source = {id:string;kind?:string;post_id?:number;title:string;text:string;created_at?:string;observed_at?:string;metrics?:Row;group?:string;site?:string;url?:string;text_truncated?:boolean};
+type Evidence = {sources:Source[];summary:Row|string;features:{name:string;popular:unknown;comparison:unknown;note:string}[];caveats:string[];prompt_template:string;retrieval?:Row};
+type Result = {question?:string;text:string;sources:Source[];model?:string;usage?:Row;steps?:{name:string;text:string}[];generated_at?:string;local_only?:boolean;retrieval_only?:boolean;context_pack?:Row;retrieval?:Row;summary?:Row|string};
+type ChatMessage = {role:'user'|'assistant';content:string;result?:Result};
+const modes = [
+ {key:'popular',title:'热门文章分析',action:'分析热门文章',description:'比较热门文章与普通文章，找出话题、开头、结构和互动方式的共性。',placeholder:'可指定话题或关注点，例如：哪些开头更容易引发回复？'},
+ {key:'write',title:'生成文章',action:'生成完整文章',description:'结合热门写法与相关事实，直接生成可编辑的完整文章。',placeholder:'说明选题、立场、目标受众与篇幅；AI 会先研究资料，再生成完整文章。'},
+ {key:'reporting',title:'举报线索',action:'查找举报线索',description:'自动选取候选账号，由 AI 检查原帖、时间线与关联证据，整理可核查的举报线索。',placeholder:'可指定要追查的行为或疑点，例如：查找反复改写相同内容并共同活动的账号。'},
+];
+export function aiScope(params:Row):Row {return Object.fromEntries(['author_id','own','since','until'].filter(key=>params[key]!==undefined&&params[key]!==null&&params[key]!=='').map(key=>[key,params[key]]));}
+export function aiHistory(messages:ChatMessage[]):{role:'user'|'assistant';content:string}[] {let budget=24000;return messages.slice(-8).reverse().map(({role,content})=>{const clipped=content.slice(-Math.min(budget,12000));if(!budget)return null;budget-=clipped.length;return {role,content:clipped};}).filter((item):item is {role:'user'|'assistant';content:string}=>item!==null).reverse();}
+const metricNames:Record<string,string>={like_count:'点赞',reply_count:'回复',repost_count:'转发',view_count:'浏览',interaction_count:'互动',interactions:'累计互动',trending_rank:'榜单名次',global_hot_score:'热度指标',rank:'排名',best_rank:'最佳排名',observations:'观测次数'};
+
+function Sources({sources}:{sources:Source[]}) {
+ const [page,setPage]=useState(1),pageSize=8;
+ useEffect(()=>setPage(1),[sources]);
+ if(!sources.length)return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前范围没有可引用资料"/>;
+ return <div className="ai-sources">{sources.slice((page-1)*pageSize,page*pageSize).map((source,index)=><article key={`${source.id}-${index}`} className="ai-source">
+  <div className="ai-source-head"><Space wrap><Tag>{source.id}</Tag><span className="muted">{source.kind==='news'?'新闻资料':({popular:'热门样本',comparison:'对照样本',context:'补充样本',retrieved:'检索样本'} as Record<string,string>)[source.group||'']||'帖子'}</span><strong>{source.title||'未命名资料'}</strong></Space>{source.post_id&&<Link to={`/posts?post=${source.post_id}`}>原帖 #{source.post_id} ↗</Link>}{source.url&&/^https?:\/\//i.test(source.url)&&<a href={source.url} target="_blank" rel="noreferrer">新闻来源 ↗</a>}</div>
+  <p className="ai-prose">{source.text?.slice(0,360)||'此资料没有正文'}{source.text?.length>360?'…':''}</p>
+  {source.text?.length>360&&<details className="ai-source-body"><summary>展开已采集正文</summary><p className="ai-prose">{source.text}</p></details>}
+  <div className="ai-source-meta">{source.site&&<span>{source.site}</span>}{source.created_at&&<span>发布 {time(source.created_at)}</span>}{source.observed_at&&<span>采集 {time(source.observed_at)}</span>}{source.text_truncated&&<span>长文节选</span>}{Object.entries(source.metrics||{}).filter(([,value])=>value!==null&&typeof value!=='object').map(([key,value])=><span key={key}>{metricNames[key]||key} {fmt(value)}</span>)}</div>
+ </article>)}{sources.length>pageSize&&<Pagination size="small" current={page} pageSize={pageSize} total={sources.length} showSizeChanger={false} onChange={setPage} showTotal={total=>`共 ${total} 条资料`}/>}</div>;
+}
+function EvidenceView({evidence}:{evidence:Evidence}) {
+ const summary=typeof evidence.summary==='object'&&evidence.summary?evidence.summary:{};
+ const postCount=summary.selected_post_count??summary.post_sample_count??evidence.sources.filter(source=>source.kind!=='news').length,newsCount=summary.selected_news_count??summary.news_selected_count??evidence.sources.filter(source=>source.kind==='news').length;
+ return <div className="ai-evidence stack">
+  <div className="ai-section-head"><h3>本地证据</h3><span className="muted">本地生成</span></div>
+  {typeof evidence.summary==='string'?<p>{evidence.summary}</p>:<div className="ai-stats"><div><span>已选帖子</span><strong>{fmt(postCount)}{typeof summary.scope_count==='number'&&<small> / {fmt(summary.scope_count)}</small>}</strong></div><div><span>已选新闻</span><strong>{fmt(newsCount)}{typeof summary.news_scope_count==='number'&&<small> / {fmt(summary.news_scope_count)}</small>}</strong></div>{typeof summary.analyzed_count==='number'&&<div><span>已检查资料</span><strong>{fmt(summary.analyzed_count)}</strong></div>}</div>}
+  {!!evidence.features?.length&&<Table size="small" rowKey="name" pagination={false} scroll={{x:540}} dataSource={evidence.features} columns={[{title:'特征',dataIndex:'name'},{title:'热门样本',dataIndex:'popular',render:fmt},{title:'对照样本',dataIndex:'comparison',render:fmt},{title:'口径 / 说明',dataIndex:'note'}]}/>}
+  <Collapse items={[{key:'sources',label:`查看引用资料（${evidence.sources?.length||0} 条）`,children:<Sources sources={evidence.sources||[]}/>},{key:'method',label:'取样说明与数据限制',children:<div className="ai-method">{typeof summary.popular_count==='number'&&<p>热门 {fmt(summary.popular_count)} 帖 · 对照 {fmt(summary.comparison_count??0)} 帖；其余为补充样本与新闻资料。</p>}<ul className="ai-caveats">{evidence.caveats?.map((text,index)=><li key={index}>{text}</li>)}</ul></div>}]} />
+ </div>;
+}
+function ResultView({result}:{result:Result}) {
+ const pack=result.context_pack;
+ return <div className="ai-result stack"><div className="ai-section-head"><Space wrap><h3>{result.local_only?'本地检索结果':'AI 执行结果'}</h3><Tag>{result.model||'本地检索'}</Tag></Space><Typography.Text copyable={{text:result.text}}>复制结果</Typography.Text></div>
+  <div className="ai-result-tags"><Tag>引用资料 {fmt(result.sources?.length||0)} 条</Tag>{typeof pack?.estimated_tokens==='number'&&<Tag>证据约 {fmt(pack.estimated_tokens)}{typeof pack.input_budget_tokens==='number'?` / ${fmt(pack.input_budget_tokens)}`:''} tokens</Tag>}</div>
+  <div className="ai-prose">{result.text}</div>
+  {!!result.steps?.length&&<Collapse items={result.steps.map((step,index)=>({key:String(index),label:`${index+1}. ${step.name}`,children:<div className="ai-prose">{step.text}</div>}))}/>}
+  <Collapse items={[{key:'sources',label:`核对引用资料（${result.sources?.length||0} 条）`,children:<Sources sources={result.sources||[]}/>},...(pack||result.retrieval?[{key:'context',label:'取材与上下文预算',children:<div className="ai-method"><p>先在本地统计、筛选，再按预算将证据交给所选 AI 服务。</p><pre className="ai-context-details">{JSON.stringify({context_pack:pack,retrieval:result.retrieval},null,2)}</pre></div>}]:[])]}/>
+  {result.generated_at&&<span className="muted">生成于 {time(result.generated_at)}{result.usage?.total_tokens?` · ${fmt(result.usage.total_tokens)} tokens`:''}</span>}
+ </div>;
+}
+
+export default function AIAnalysis({params}:{params:Row}) {
+ const providers=useApi<Settings>('/ai/providers'),settings=providers.data||{providers:[]},navigate=useNavigate();
+ const [searchParams,setSearchParams]=useSearchParams();
+ const [providerId,setProviderId]=useState<string|null>(null),[embeddingId,setEmbeddingId]=useState<string|null>(null),[rerankId,setRerankId]=useState<string|null>(null),[tab,setTab]=useState(params.ai_view==='research'?'research':params.ai_view==='chat'?'chat':'workspace'),[mode,setMode]=useState(params.ai_view==='screening'?'reporting':'popular'),[instruction,setInstruction]=useState(''),[sampleSize,setSampleSize]=useState(100),[includeNews,setIncludeNews]=useState(true),[evidence,setEvidence]=useState<Evidence|null>(null),[result,setResult]=useState<Result|null>(null),[error,setError]=useState(''),[question,setQuestion]=useState(''),[messages,setMessages]=useState<ChatMessage[]>([]);
+ const preview=useAction<Evidence>('/ai/preview'),run=useAIJob<Result>(),chat=useAIJob<Result>({path:'/ai/chat',kind:'chat'}),scope=aiScope(params),scopeKey=JSON.stringify(scope);
+ const textProviders=settings.providers.filter(provider=>provider.protocol==='openai_chat'),preferredId=providerId??settings.default_provider_id??textProviders.find(provider=>provider.is_default)?.id??'',selectedId=providerId===''?'':textProviders.some(provider=>provider.id===preferredId)?preferredId:textProviders.find(provider=>providerReady(provider))?.id??'',selected=textProviders.find(provider=>provider.id===selectedId),cloudReady=providerReady(selected);
+ const embeddingProviders=settings.providers.filter(provider=>provider.protocol==='openai_embeddings'),rerankProviders=settings.providers.filter(provider=>provider.protocol==='rerank');
+ const selectRole=(id:string|null,items:Provider[])=>id===''?'':items.some(provider=>provider.id===id&&providerReady(provider))?id!:items.find(providerReady)?.id??'';
+ const selectedEmbedding=selectRole(embeddingId,embeddingProviders),selectedRerank=selectRole(rerankId,rerankProviders),retrievalOptions={...(selectedEmbedding?{embedding_provider_id:selectedEmbedding}:{}),...(selectedRerank?{rerank_provider_id:selectedRerank}:{})};
+ const evidenceKey=JSON.stringify([scopeKey,sampleSize,includeNews,selectedEmbedding,selectedRerank]),requestKey=JSON.stringify([evidenceKey,mode,instruction,selectedId]),requestVersion=useRef(0),lastRequest=useRef(requestKey);
+ const chatKey=JSON.stringify([evidenceKey,selectedId]),chatVersion=useRef(0),lastChat=useRef(chatKey);
+ const busy=preview.isPending||run.isPending||chat.isPending,task=modes.find(item=>item.key===mode)||modes[0];
+ if(lastRequest.current!==requestKey){lastRequest.current=requestKey;requestVersion.current++;}
+ if(lastChat.current!==chatKey){lastChat.current=chatKey;chatVersion.current++;}
+ useEffect(()=>{setEvidence(null);setResult(null);setError('');},[requestKey]);
+ useEffect(()=>{setMessages([]);},[evidenceKey,selectedId]);
+ useEffect(()=>{if(run.recoveredResult)setResult(run.recoveredResult);},[run.recoveredResult]);
+ useEffect(()=>{if(chat.recoveredResult){const value=chat.recoveredResult;setMessages([...(value.question?[{role:'user' as const,content:value.question}]:[]),{role:'assistant',content:value.text,result:value}]);}},[chat.recoveredResult]);
+ useEffect(()=>{if(params.ai_view==='screening'){setTab('workspace');setMode('reporting');}else if(['workspace','research','chat'].includes(String(params.ai_view)))setTab(String(params.ai_view));},[params.ai_view]);
+ function changeTab(value:string){setTab(value);const next=new URLSearchParams(searchParams);next.set('ai_view',value);setSearchParams(next,{replace:true});}
+ const evidenceOptions={sample_size:sampleSize,include_news:includeNews,...retrievalOptions};
+ async function localPreview(){const version=requestVersion.current;try{setError('');const data=await preview.mutateAsync({params:scope,mode,instruction,...evidenceOptions});if(version===requestVersion.current)setEvidence(data);}catch(error){if(version===requestVersion.current)setError(error instanceof Error?error.message:'资料预览失败');}}
+ async function cloudRun(){if(!cloudReady)return;const version=requestVersion.current;try{setError('');const data=await run.mutateAsync({params:scope,mode,instruction,...evidenceOptions,provider_id:selectedId,agent:false});if(version===requestVersion.current)setResult(data);}catch(error){if(version===requestVersion.current)setError(error instanceof Error?error.message:'AI 请求失败');}}
+ async function send(){if(!question.trim()||busy||selectedId&&!cloudReady)return;const version=chatVersion.current,text=question.trim(),history=aiHistory(messages);try{setError('');setQuestion('');setMessages([...messages,{role:'user',content:text}]);const data=await chat.mutateAsync({params:scope,question:text,provider_id:selectedId||undefined,history,...evidenceOptions});if(version===chatVersion.current)setMessages(previous=>[...previous,{role:'assistant',content:data.text,result:data}]);}catch(error){if(version===chatVersion.current){setError(error instanceof Error?error.message:'聊天请求失败');setQuestion(text);setMessages(messages);}}}
+ const evidenceControls=<Collapse ghost className="ai-evidence-controls" items={[{key:'sampling',label:`资料设置 · 最多 ${sampleSize} 帖${includeNews?' + 新闻':''}`,children:<div className="ai-sampling"><div className="ai-sampling-fields"><label htmlFor="ai-sample-size">本地候选上限</label><Select id="ai-sample-size" aria-label="帖子样本数" value={sampleSize} onChange={value=>setSampleSize(Number(value))} options={[40,100,200].map(value=>({value,label:`最多 ${value} 帖`}))}/><label htmlFor="ai-include-news">补充新闻依据</label><Switch id="ai-include-news" aria-label="补充新闻依据" checked={includeNews} onChange={setIncludeNews}/></div><p>候选资料先统计、筛选，再按上下文预算交给 AI；实际发送量会在结果中显示。</p><p>文章任务沿用当前账号、作者与发布时间筛选；举报线索按时间范围检查其他账号，自动排除本队。</p></div>}]} />;
+ const retrievalControls=<Collapse ghost className="ai-evidence-controls" items={[{key:'retrieval',label:`检索服务 · ${selectedEmbedding?'云端向量 + 关键词':'关键词检索'}${selectedRerank?' · 云端重排':''}`,children:<div className="ai-sampling"><div className="ai-retrieval-fields"><div><label htmlFor="ai-embedding-provider">语义检索服务</label><Select id="ai-embedding-provider" aria-label="语义检索服务" value={selectedEmbedding} onChange={setEmbeddingId} options={[{value:'',label:'仅关键词检索'},...embeddingProviders.map(provider=>({value:provider.id,label:`${provider.name} · ${provider.model}`,disabled:!providerReady(provider)}))]}/></div><div><label htmlFor="ai-rerank-provider">重排服务</label><Select id="ai-rerank-provider" aria-label="重排服务" value={selectedRerank} onChange={setRerankId} options={[{value:'',label:'按检索排序'},...rerankProviders.map(provider=>({value:provider.id,label:`${provider.name} · ${provider.model}`,disabled:!providerReady(provider)}))]}/></div></div><p>{selectedEmbedding?'向所选云端向量服务发送检索资料，生成语义索引。':'未选择向量服务，当前使用关键词检索。'}{selectedRerank?'所选云端重排服务会对候选原文重新排序。':'未选择重排服务，沿用检索排序。'}云端服务可能计费。</p><Button size="small" type="link" onClick={()=>navigate('/ai/settings')}>配置云端向量和重排服务</Button></div>}]} />;
+ const instructionInput=<Form layout="vertical" className="ai-request-form"><Form.Item label={mode==='write'?'文章要求':'补充要求（可选）'}><Input.TextArea aria-label="分析要求或草稿" value={instruction} onChange={event=>setInstruction(event.target.value)} autoSize={{minRows:3,maxRows:10}} maxLength={12000} placeholder={task.placeholder}/></Form.Item></Form>;
+ const actions=<div className="ai-actions"><Button type="primary" disabled={busy||!cloudReady} loading={run.isPending} onClick={()=>void cloudRun()}>{task.action}</Button><span className="muted">{cloudReady?`由 ${selected!.name} 直接执行${mode==='write'?' · 研究资料后生成成稿':''}`:'请先配置文字 AI 服务'}{!cloudReady&&<Button size="small" type="link" onClick={()=>navigate('/ai/settings')}>配置 AI 服务</Button>}</span></div>;
+ return <div className="ai-analysis stack">
+  <div className="ai-toolbar"><h2>AI 分析</h2>{tab!=='research'&&<div className="ai-provider-picker"><label htmlFor="ai-provider">文字 AI 服务</label><Select id="ai-provider" aria-label="当前 AI 服务" value={selectedId} disabled={busy} onChange={setProviderId} options={[{value:'',label:'仅资料检索'},...textProviders.map(provider=>({value:provider.id,label:`${provider.name} · ${provider.model}${!provider.enabled?'（已停用）':!providerReady(provider)?'（缺少密钥）':''}`,disabled:!providerReady(provider)}))]} notFoundContent="请先添加 API 配置"/><Button type="text" size="small" onClick={()=>navigate('/ai/settings')}>配置服务</Button></div>}</div>
+  {providers.isError&&<Alert type="error" title="API 配置读取失败" description={providers.error.message} action={<Button onClick={()=>void providers.refetch()}>重试</Button>}/>} {error&&<Alert type="error" title={error} showIcon closable onClose={()=>setError('')}/>}
+  <AIJobStatus job={run} label="分析任务"/>
+  <AIJobStatus job={chat} label="资料聊天"/>
+  <Tabs activeKey={tab} onChange={changeTab} destroyOnHidden items={[
+   {key:'research',label:'内容研究',children:<ContentResearch params={params}/>},
+   {key:'workspace',label:'分析工作台',children:<div className="stack"><section className="ai-composer"><div className="ai-mode-list" aria-label="分析任务">{modes.map(item=><button type="button" className={`ai-mode ${mode===item.key?'is-active':''}`} key={item.key} aria-pressed={mode===item.key} onClick={()=>setMode(item.key)}>{item.title}</button>)}</div><p className="ai-task-help">{task.description}</p>{instructionInput}{evidenceControls}{retrievalControls}{actions}</section>{result&&<ResultView result={result}/>}<Collapse className="ai-local-preview" items={[{key:'preview',label:'查看取材预览（可选）',children:<div className="stack"><p className="muted">预览只检查本地可用资料，不调用云端模型；直接运行任务时会自动检索和选材。</p><Button disabled={busy} loading={preview.isPending} onClick={()=>void localPreview()}>预览资料</Button>{evidence&&<EvidenceView evidence={evidence}/>}</div>}]} />{mode==='reporting'&&<Collapse items={[{key:'screening',label:'本地详细检查（可选）',children:<AccountScreening params={Object.fromEntries(['since','until'].filter(key=>scope[key]!==undefined).map(key=>[key,scope[key]]))} onConfigure={()=>navigate('/ai/settings')}/>}]} />}</div>},
+   {key:'chat',label:'资料聊天',children:<div className="stack"><div className="ai-section-head"><h3>向帖子和新闻资料提问</h3><Button size="small" disabled={busy||!messages.length} onClick={()=>{setMessages([]);setError('');}}>清空对话</Button></div>{evidenceControls}{retrievalControls}<div className="ai-chat-log" role="log" aria-label="资料聊天记录" aria-live="polite">{!messages.length&&<div className="ai-chat-welcome"><strong>输入问题，带着资料继续追问</strong><p>例如：这些热门帖怎样引导回复？哪些内容结构值得复用？</p><span className="muted">{cloudReady?'AI 回答附引用':'资料检索附引用'}</span></div>}{messages.map((item,index)=><article key={index} className={`ai-chat-message ai-chat-${item.role}`}><strong>{item.role==='user'?'你':item.result?.retrieval_only||item.result?.local_only?(item.result?.local_only?'资料助手':'检索助手'):item.result?.model||'AI 助手'}</strong><div className="ai-prose">{item.content}</div>{item.result&&<Collapse size="small" items={[{key:'sources',label:`引用资料（${item.result.sources?.length||0} 条）`,children:<Sources sources={item.result.sources||[]}/>}]} />}</article>)}{chat.isPending&&<p role="status" className="muted">正在检索资料{cloudReady?'并组织回答':''}…</p>}</div><Input.TextArea aria-label="向帖子资料提问" value={question} disabled={busy} onChange={event=>setQuestion(event.target.value)} maxLength={4000} autoSize={{minRows:2,maxRows:6}} placeholder="输入具体问题，可指定话题或帖子…"/><div className="ai-section-head"><span className="muted">{cloudReady?'发送问题、近期对话和精选资料至所选文字 AI':selectedEmbedding||selectedRerank?'使用所选检索服务，返回原文依据；不调用文字生成模型':'使用本地关键词检索，返回原文依据'}</span><Button type="primary" loading={chat.isPending} disabled={busy||!question.trim()||!!selectedId&&!cloudReady} onClick={()=>void send()}>发送问题</Button></div><details className="ai-method"><summary>对话与检索说明</summary><p>检索按已选服务使用关键词、云端向量和重排。对话保留在本次页面会话；切换资料范围或服务后清空。模型上下文最多保留最近 8 条消息。</p></details></div>}
+  ]}/>
+ </div>;
+}

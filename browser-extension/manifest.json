@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "CTN 本队积分同步",
+  "version": "1.4.0",
+  "description": "只读取本队总分、活动流水和赛事排行榜，自动同步至本机 CTN。",
+  "permissions": [
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "https://community.capturethenarrative.com/user/teams/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://community.capturethenarrative.com/user/teams/*"
+      ],
+      "js": [
+        "page.js",
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}

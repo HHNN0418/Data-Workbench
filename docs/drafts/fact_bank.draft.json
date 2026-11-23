@@ -1,0 +1,311 @@
+{
+  "version": 1,
+  "updated_at": "2026-10-21",
+  "note": "Draft for review. Every claim is taken from the official competition setting (setting) or a collected Kingstonia Herald article (herald:<date>). Agents may only state facts from this file.",
+  "facts": [
+    {
+      "id": "first_case",
+      "claim": "Kingstonia confirmed its first H2D2 case on 21 October, a traveller now in isolation; close contacts are being tested.",
+      "source": "herald:2026-10-21 First H2D2 case confirmed in Kingstonia",
+      "concerns": ["not_here_yet", "outbreak_risk", "timing"]
+    },
+    {
+      "id": "regional_spread",
+      "claim": "The IHO confirmed sustained community transmission in two more Pacific nations on 17 October and urged nearby countries to act before local outbreaks take hold.",
+      "source": "herald:2026-10-17 IHO reports sustained H2D2 transmission",
+      "concerns": ["not_here_yet", "outbreak_risk", "timing", "overreaction"]
+    },
+    {
+      "id": "iho_recommends",
+      "claim": "The International Health Organisation recommends vaccinating before widespread community transmission begins, not after.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["not_here_yet", "overreaction", "timing", "power_grab"]
+    },
+    {
+      "id": "cmo_advice",
+      "claim": "Chief Medical Officer Dr Eleanor Whitlock, who ran the COVID testing programme, advised that waiting for widespread spread could leave our small health system dangerously exposed.",
+      "source": "setting: The question on the ballot",
+      "concerns": ["not_here_yet", "overreaction", "hospital", "power_grab"]
+    },
+    {
+      "id": "icu_capacity",
+      "claim": "Both public hospitals together have about 30 intensive-care beds and roughly 40 ventilators.",
+      "source": "setting: The health system",
+      "concerns": ["hospital", "overreaction", "not_here_yet"]
+    },
+    {
+      "id": "surge_150",
+      "claim": "The H2D2 surge plan assumes the hospitals can absorb only about 150 extra respiratory patients before ordinary care suffers.",
+      "source": "setting: The health system",
+      "concerns": ["hospital", "overreaction"]
+    },
+    {
+      "id": "one_in_twenty",
+      "claim": "Across the region roughly one confirmed H2D2 case in twenty has needed hospital care.",
+      "source": "setting: About H2D2",
+      "concerns": ["hospital", "mild_disease", "overreaction"]
+    },
+    {
+      "id": "deaths_vulnerable",
+      "claim": "Almost all regional H2D2 deaths so far have been people over 60 or with existing illness.",
+      "source": "setting: About H2D2",
+      "concerns": ["mild_disease", "protect_vulnerable"]
+    },
+    {
+      "id": "nurse_vacancies",
+      "claim": "Kingstonia Central Hospital has 40 unfilled nursing posts, and the hospital warned on 18 October that this limits its ability to handle a surge.",
+      "source": "herald:2026-10-18 Kingstonia Central Hospital warns of staffing shortages",
+      "concerns": ["hospital", "overreaction"]
+    },
+    {
+      "id": "wet_season",
+      "claim": "The wet season starts in November, when seasonal respiratory illness already adds to hospital workload.",
+      "source": "herald:2026-10-18 staffing shortages; herald:2026-10-17 IHO",
+      "concerns": ["hospital", "timing"]
+    },
+    {
+      "id": "covid_toll",
+      "claim": "During COVID more than 1,000 Kingstonians died, hospitals ran above capacity, elective surgery stopped for most of a year and field wards went into a Crown Harbour sports hall.",
+      "source": "setting: The COVID legacy; The health system",
+      "concerns": ["hospital", "lockdown_memory", "overreaction"]
+    },
+    {
+      "id": "avoid_lockdown",
+      "claim": "MOUK's case is that vaccinating before H2D2 arrives makes another general lockdown less likely, which is what hurt shops and tourism most last time.",
+      "source": "setting: The YES Campaign",
+      "concerns": ["lockdown_memory", "tourism", "work_business", "economy"]
+    },
+    {
+      "id": "not_forced",
+      "claim": "Nobody would be physically forced to take the vaccine; the rule only concerns entry to designated public spaces.",
+      "source": "setting: The YES Campaign",
+      "concerns": ["freedom", "choice", "bodily_autonomy"]
+    },
+    {
+      "id": "free_vaccine",
+      "claim": "The vaccine is free to the person receiving it, at hospitals, GP clinics and pop-up sites.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["cost", "access", "two_tier", "work_business"]
+    },
+    {
+      "id": "phased_after_access",
+      "claim": "If Yes wins, the government says the rule is phased in only after every eligible Kingstonian has had a reasonable chance to be vaccinated.",
+      "source": "setting: What a result would mean; herald:2026-10-20 Hawthorne commits",
+      "concerns": ["rushed", "access", "two_tier", "work_business", "timing"]
+    },
+    {
+      "id": "medical_exemptions",
+      "claim": "Medical exemptions would be available under the rule.",
+      "source": "setting: Who and what the requirement would cover",
+      "concerns": ["safety", "two_tier", "freedom", "protect_vulnerable"]
+    },
+    {
+      "id": "under_12_exempt",
+      "claim": "Children under 12 would be exempt; the rule would apply from age 12 because the vaccine has been trialled in adults and adolescents.",
+      "source": "setting: Who and what the requirement would cover",
+      "concerns": ["children", "school"]
+    },
+    {
+      "id": "certificate_separate",
+      "claim": "Proof would be a paper or digital health-ministry certificate, separate from the new national ID card.",
+      "source": "setting: Who and what the requirement would cover",
+      "concerns": ["id_privacy", "surveillance"]
+    },
+    {
+      "id": "id_law_no_health",
+      "claim": "The government confirmed on 18 October that current law does not authorise storing health data on the new ID cards.",
+      "source": "herald:2026-10-18 Privacy concerns rise over new national ID cards",
+      "concerns": ["id_privacy", "surveillance", "power_grab"]
+    },
+    {
+      "id": "visitors_overseas_certs",
+      "claim": "Foreign visitors could use recognised overseas vaccination certificates, so travel to Kingstonia stays open.",
+      "source": "setting: Who and what the requirement would cover; herald:2026-10-20 Tourism operators seek clarity",
+      "concerns": ["tourism", "economy"]
+    },
+    {
+      "id": "no_border_closure",
+      "claim": "Neither campaign is proposing to close the border; arrivals are temperature-screened at the airport.",
+      "source": "setting: About H2D2",
+      "concerns": ["tourism", "lockdown_memory"]
+    },
+    {
+      "id": "trial_results",
+      "claim": "Accelerated international trials found a strong immune response and lower risk of serious disease, with no major safety concerns so far; an independent panel agreed on 20 October.",
+      "source": "setting: The H2D2 Vaccine; herald:2026-10-20 Advisory panel",
+      "concerns": ["safety", "rushed", "new_vaccine"]
+    },
+    {
+      "id": "mrna_platform",
+      "claim": "The H2D2 vaccine adapts an existing mRNA platform developed during COVID rather than starting from scratch.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["rushed", "new_vaccine", "safety"]
+    },
+    {
+      "id": "no_fault_compensation",
+      "claim": "Anyone with a vaccine injury can claim from the government's no-fault compensation scheme set up during COVID.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["safety", "new_vaccine", "liability"]
+    },
+    {
+      "id": "first_doses_priority",
+      "claim": "The first 120,000 doses arrive in the last week of October, going first to health workers and people at high risk.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["access", "protect_vulnerable", "timing"]
+    },
+    {
+      "id": "whole_population_supply",
+      "claim": "Kingstonia has ordered enough vaccine for the whole population through the IHO Pacific scheme, arriving in monthly tranches.",
+      "source": "setting: The H2D2 Vaccine",
+      "concerns": ["access", "two_tier", "rushed"]
+    },
+    {
+      "id": "public_vote",
+      "claim": "This is a public vote, not a decree: the Assembly passed the Referendum Act with cross-party support and the government committed to respect the result.",
+      "source": "setting: How the referendum came about",
+      "concerns": ["power_grab", "precedent", "democracy"]
+    },
+    {
+      "id": "no_vote_locks_out",
+      "claim": "If No wins, no H2D2 access rule can be introduced for the life of this Assembly without another referendum.",
+      "source": "setting: What a result would mean",
+      "concerns": ["timing", "not_here_yet", "wait_and_see"]
+    },
+    {
+      "id": "kitb_not_anti_vax",
+      "claim": "Even the No campaign officially supports H2D2 vaccination; the dispute is only about whether to act before an outbreak.",
+      "source": "setting: The NO Campaign",
+      "concerns": ["safety", "new_vaccine", "choice"]
+    },
+    {
+      "id": "kitb_leader_resorts",
+      "claim": "The No campaign is led by Marina Castillo, CEO of the Island Horizons Resort Group and last year's defeated presidential candidate.",
+      "source": "setting: The NO Campaign",
+      "concerns": ["economy", "tourism", "power_grab"]
+    },
+    {
+      "id": "poll_undecided",
+      "claim": "The 21 October Herald poll has No 36.2%, Yes 33.8% and 29.5% unsure, within the margin of error.",
+      "source": "herald:2026-10-21 No campaign takes slight lead",
+      "concerns": ["momentum", "undecided"]
+    },
+    {
+      "id": "early_voting",
+      "claim": "Early voting opens 28 October and polling day is Monday 2 November, 8am to 6pm.",
+      "source": "setting: How the referendum came about",
+      "concerns": ["timing", "undecided"]
+    },
+    {
+      "id": "lab_capacity",
+      "claim": "Kingstonia's two hospital labs can run only a few hundred H2D2 tests a day.",
+      "source": "setting: About H2D2; herald:2026-10-21 First case",
+      "concerns": ["hospital", "wait_and_see", "not_here_yet"]
+    },
+    {
+      "id": "outer_islands",
+      "claim": "Outer islands rely on nurse-led clinics with a weekly visiting GP; emergencies go by coast guard helicopter or ferry.",
+      "source": "setting: The health system",
+      "concerns": ["hospital", "outer_islands", "access"]
+    }
+  ],
+  "rebuttals": [
+    {
+      "concern": "not_here_yet",
+      "no_argument": "There is no outbreak in Kingstonia, so a mandate is premature.",
+      "line": "The first case is already here, and the IHO and our CMO both say the time to act is before spread, not after.",
+      "fact_ids": ["first_case", "regional_spread", "iho_recommends", "cmo_advice", "no_vote_locks_out"]
+    },
+    {
+      "concern": "overreaction",
+      "no_argument": "The response is disproportionate to a disease that is mostly mild.",
+      "line": "With about 30 ICU beds, even a mild-for-most virus can fill them fast.",
+      "fact_ids": ["icu_capacity", "surge_150", "one_in_twenty", "nurse_vacancies"]
+    },
+    {
+      "concern": "two_tier",
+      "no_argument": "It creates a two-tier society.",
+      "line": "It is free, phased in only after everyone has had a chance, with medical exemptions. The real two tiers are people who can wait for a hospital bed and people who can't.",
+      "fact_ids": ["free_vaccine", "phased_after_access", "medical_exemptions", "icu_capacity"]
+    },
+    {
+      "concern": "freedom",
+      "no_argument": "Medical decisions should be personal choice.",
+      "line": "Nobody is forced to take a jab; this is about keeping shared spaces and shared hospitals working.",
+      "fact_ids": ["not_forced", "medical_exemptions", "icu_capacity"]
+    },
+    {
+      "concern": "work_business",
+      "no_argument": "People will be unable to work or run businesses.",
+      "line": "Another lockdown is what closes businesses. Vaccinating first is how we avoid that.",
+      "fact_ids": ["avoid_lockdown", "covid_toll", "phased_after_access", "free_vaccine"]
+    },
+    {
+      "concern": "tourism",
+      "no_argument": "It will damage the tourism recovery.",
+      "line": "Visitors can use overseas certificates. An outbreak is what empties resorts.",
+      "fact_ids": ["visitors_overseas_certs", "no_border_closure", "avoid_lockdown", "covid_toll"]
+    },
+    {
+      "concern": "id_privacy",
+      "no_argument": "It turns the national ID into a health passport.",
+      "line": "The certificate is separate from the ID card, and the law does not allow health data on it.",
+      "fact_ids": ["certificate_separate", "id_law_no_health"]
+    },
+    {
+      "concern": "safety",
+      "no_argument": "The vaccine is new and long-term effects are unknown.",
+      "line": "Trials show strong protection against serious disease and no major safety concerns, and there is no-fault compensation if anything goes wrong.",
+      "fact_ids": ["trial_results", "mrna_platform", "no_fault_compensation", "medical_exemptions", "kitb_not_anti_vax"]
+    },
+    {
+      "concern": "rushed",
+      "no_argument": "This is being rushed.",
+      "line": "The rule waits until everyone has had a fair chance to get the vaccine; what is rushed is a virus that is already at the airport.",
+      "fact_ids": ["phased_after_access", "whole_population_supply", "first_case", "mrna_platform"]
+    },
+    {
+      "concern": "children",
+      "no_argument": "Kids will be forced or shut out of school.",
+      "line": "Under-12s are exempt.",
+      "fact_ids": ["under_12_exempt"]
+    },
+    {
+      "concern": "power_grab",
+      "no_argument": "The government is grabbing emergency powers.",
+      "line": "This is a public vote the Assembly sent to the people with cross-party support. You get the final say.",
+      "fact_ids": ["public_vote", "cmo_advice", "id_law_no_health"]
+    },
+    {
+      "concern": "precedent",
+      "no_argument": "It sets a dangerous precedent for future emergencies.",
+      "line": "This rule comes from one ballot question about H2D2, decided by voters, not a general emergency power.",
+      "fact_ids": ["public_vote"]
+    },
+    {
+      "concern": "venue_list",
+      "no_argument": "The venue list has not been published, so Yes is a blank cheque.",
+      "line": "The ballot question itself names shops, schools, workplaces, public transport and parks, and nothing starts until everyone has had a chance to get vaccinated.",
+      "fact_ids": ["phased_after_access", "public_vote"]
+    },
+    {
+      "concern": "wait_and_see",
+      "no_argument": "Vote No now and decide later if there is an outbreak.",
+      "line": "A No vote rules out any access rule for the life of this Assembly unless there is another referendum.",
+      "fact_ids": ["no_vote_locks_out", "lab_capacity", "first_case"]
+    },
+    {
+      "concern": "cost",
+      "no_argument": "It is too costly.",
+      "line": "The jab is free to you, and the cost of a full hospital and another lockdown is far higher.",
+      "fact_ids": ["free_vaccine", "covid_toll", "avoid_lockdown"]
+    }
+  ],
+  "do_not_claim": [
+    "Do not claim the vaccine prevents transmission or stops spread; real-world transmission data is limited.",
+    "Do not claim how long protection lasts or that no boosters will be needed.",
+    "Do not claim the designated venue list has been published; the government says it comes after the vote via regulations.",
+    "Do not claim community transmission exists in Kingstonia; officials say there is no evidence of it yet.",
+    "Do not invent numbers, polls, quotes, deaths or case counts beyond this file.",
+    "Do not attack people as anti-vax; the No campaign officially supports voluntary vaccination."
+  ]
+}

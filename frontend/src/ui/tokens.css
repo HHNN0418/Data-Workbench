@@ -1,0 +1,7 @@
+/* Size scale (docs/UX_IA_PLAN.md §13.2). Colours come from ui/theme.ts via applyCssVariables(). */
+:root{
+ --font-12:12px;--font-13:13px;--font-14:14px;--font-16:16px;--font-20:20px;--font-28:28px;
+ --space-4:4px;--space-8:8px;--space-12:12px;--space-16:16px;--space-24:24px;--space-32:32px;
+ --radius-control:6px;--radius-card:10px;
+ --sidebar-width:216px;
+}

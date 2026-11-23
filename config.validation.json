@@ -1,0 +1,18 @@
+{
+  "page_limit": 20,
+  "max_pages": 1,
+  "counter_limit": 10,
+  "counter_new_share": 0.5,
+  "counter_recent_share": 0.5,
+  "counter_window_share": 0.4,
+  "account_limit": 10,
+  "news_limit": 2,
+  "site_limit": 2,
+  "collect_trending": true,
+  "collect_news": true,
+  "request_budget": 35,
+  "deadline_seconds": 45,
+  "max_wait_seconds": 10,
+  "max_retries": 1,
+  "timeout": 10
+}

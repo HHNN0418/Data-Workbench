@@ -1,0 +1,7 @@
+.identity-search{max-width:260px}
+.identity-reasons{margin:0;padding-left:18px;font-size:var(--font-12);color:var(--text-2)}
+.identity-last{max-width:340px;font-size:var(--font-13);overflow-wrap:anywhere}
+.identity-caveats{margin:0;padding-left:18px;font-size:var(--font-12)}
+@media(max-width:767px){.identity-search{max-width:none;width:100%}}
+.identity-calibration-accounts{display:inline-flex;flex-wrap:wrap;gap:4px 10px}
+.identity-calibration-miss{color:var(--warning,#b45309);font-weight:600}
